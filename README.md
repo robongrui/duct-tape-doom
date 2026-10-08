@@ -1,7 +1,7 @@
-# DOOM — modern port with a retro 3D renderer
+# Duct-Tape DOOM
 
-A port of id Software's 1997 DOOM source release to modern macOS, Linux and
-Windows. It keeps the original game simulation, and adds an optional
+A hacked-together-for-fun port of id Software's 1997 DOOM source release to
+modern macOS, Linux and Windows. It keeps the original game simulation, and adds an optional
 GPU renderer that builds a 3D scene from the WAD at runtime. Every effect is
 derived from the unmodified game data: nothing is replaced, converted or
 downloaded, and the result is meant to still feel like DOOM.
