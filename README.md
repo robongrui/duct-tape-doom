@@ -6,6 +6,48 @@ GPU renderer that builds a 3D scene from the WAD at runtime. Every effect is
 derived from the unmodified game data: nothing is replaced, converted or
 downloaded, and the result is meant to still feel like DOOM.
 
+This port was built with Claude, but that doesn't mean Claude made it: every
+effect was tuned by hand and chosen deliberately. The default settings are
+how I prefer to play DOOM; everything else can be switched in the graphics
+panel (F4).
+
+Most of the effects are here because I liked them in other old games. Few of
+them are actually modern; they are fake-modern, cheap tricks that look the
+part. A few examples of how they work:
+
+- **Sprite shadows** are not shadow maps. The enemy's current sprite frame is
+  squashed flat and painted onto the floor as a soft, translucent black decal,
+  so the shadow animates with the monster and fades and spreads as it rises
+  off the ground. When a rocket or shot flashes nearby, a second copy is
+  stretched away from that light. Shadows never climb walls
+  (`addEnemyShadow` in [`platform/scene3d.cpp`](platform/scene3d.cpp)).
+- **Muzzle flashes and projectiles** light the room in their own color, and
+  that color is read from the sprite: the renderer looks at the bright,
+  saturated pixels of the weapon flash or fireball artwork and ignores
+  outlines and white cores. A plasma ball glows blue because its sprite is
+  blue ([`platform/flash_lighting.h`](platform/flash_lighting.h)).
+- **Glowing lamps, lava and computer displays** are found by texture name and
+  palette color, not authored. Those pixels get a glow mask, a blurred halo
+  and a few approximate point lights placed at the center of each texture
+  repeat ([`platform/emissive.h`](platform/emissive.h)).
+- **Monitor screens** are flat textures that pretend to be curved CRT glass.
+  Dark rectangles framed by lighter housing are detected in the pixels, then
+  the shader gives each one a fake dome normal for highlights, a slight lens
+  bulge and darker edges. There is no extra geometry
+  ([`platform/screen_glass.h`](platform/screen_glass.h)).
+- **Light baked at level load** is old-school lightmapping. While the level
+  loads, rays walk the 2D map from sector to sector, the way Doom itself sees
+  it, and gather light from torches, lamps, glowing floors, sun through sky
+  ceilings, one bounce off nearby surfaces, and a sky fill tinted by the sky
+  texture. Grates and fences block light where their pixels are solid, and
+  decorations such as columns, trees and hanging bodies stand in as their own
+  sprite, so their shadows show the outline of the art. The result is
+  stored once per texture pixel, so baked light steps along Doom's texel
+  grid instead of smearing across it
+  ([`platform/baked_lighting.h`](platform/baked_lighting.h)).
+- **Fog** is a single closed-form distance haze with a cone for the
+  flashlight, not a volumetric raymarch.
+
 - **Accelerated 3D renderer** (SDL_gpu: Metal on macOS, Vulkan on Linux and
   Windows) at native resolution, any aspect ratio, with mouse look,
   interpolated movement and 4× MSAA. The classic 320×200 software renderer
