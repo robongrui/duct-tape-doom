@@ -29,6 +29,7 @@ cp "$freedoom_dir/freedoom1.wad" "$stage/default.wad"
 cp "$project_dir/README.md" "$project_dir/PLAY.md" "$stage/"
 cp "$project_dir/LICENSE.TXT" "$stage/licenses/DOOM-GPL-2.txt"
 cp "$project_dir/third_party/xbr/LICENSE.txt" "$stage/licenses/Hyllian-xBR.txt"
+cp "$project_dir/third_party/spleen/LICENSE.txt" "$stage/licenses/Spleen-font.txt"
 cp "$build_dir/_deps/sdl3-src/LICENSE.txt" "$stage/licenses/SDL3.txt"
 cp "$build_dir/_deps/nukedopl3-src/LICENSE" "$stage/licenses/Nuked-OPL3-LGPL-2.1.txt"
 for item in COPYING.txt CREDITS.txt CREDITS-MUSIC.txt README.html; do

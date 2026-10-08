@@ -40,8 +40,9 @@ SDL_GPUSampler *linearRepeat,*linearClamp,*nearestClamp,*detailSampler;
 SDL_GPUShader *worldVertexShader,*reflectVertexShader,*screenVertexShader,*skyVertexShader;
 SDL_GPUGraphicsPipeline *opaquePipeline,*skyPipeline,*skySurfacePipeline,*reflectSkySurfacePipeline,*worldPipeline,*shadowPipeline,*decalPipeline,*particlePipeline,*heatPipeline,
     *weaponPipeline,*hudPipeline,*solidPipeline,*mistPipeline,*shaftPipeline,*overlayWeaponPipeline,*overlayHudPipeline,*overlaySolidPipeline,
-    *reflectOpaquePipeline,*reflectSkyPipeline,*reflectWorldPipeline,*emissionPipeline,*blurPipeline,*presentPipeline,*depthPipeline;
-SDL_GPUTexture *hudTexture,*paletteTexture,*paletteLUT,*dummySeam,*dummyContact,*dummyBake,*solidTexel,
+    *reflectOpaquePipeline,*reflectSkyPipeline,*reflectWorldPipeline,*emissionPipeline,*blurPipeline,*presentPipeline,*depthPipeline,
+    *settingsPipeline;
+SDL_GPUTexture *settingsTexture,*hudTexture,*paletteTexture,*paletteLUT,*dummySeam,*dummyContact,*dummyBake,*solidTexel,
     *multisampleTexture,*colorTexture,*depthTexture,*sceneDepth,*emissionTexture,*emissionDepth,*bloomScratch,*bloomTexture,
     *reflectionTexture,*reflectionDepth,*detailTexture;
 int width,height,reflectionWidth,reflectionHeight;
@@ -228,6 +229,7 @@ bool createPipelines() {
     emissionPipeline=pipeline(wv,emission,opaqueBlend,depthWrite,one,glow);
     blurPipeline=pipeline(sv,blur,opaqueBlend,noDepth,one,glow);
     presentPipeline=pipeline(sv,present,opaqueBlend,noDepth,one,swapchainFormat);
+    settingsPipeline=pipeline(wv,hud,alphaBlend,noDepth,one,swapchainFormat);
     depthPipeline=pipeline(wv,depth,opaqueBlend,depthOnly,one,color);
     for(SDL_GPUShader *s:{world,opaque,sky,skySurface,shadow,decal,particle,heat,solid,hud,emission,blur,mist,present,depth})
         if(s)SDL_ReleaseGPUShader(device,s);
@@ -235,7 +237,7 @@ bool createPipelines() {
         if(*s) {SDL_ReleaseGPUShader(device,*s);*s=nullptr;}
     for(auto *p:{opaquePipeline,skyPipeline,skySurfacePipeline,reflectSkySurfacePipeline,worldPipeline,shadowPipeline,decalPipeline,particlePipeline,heatPipeline,weaponPipeline,hudPipeline,
                  solidPipeline,mistPipeline,shaftPipeline,overlayWeaponPipeline,overlayHudPipeline,overlaySolidPipeline,reflectOpaquePipeline,
-                 reflectSkyPipeline,reflectWorldPipeline,emissionPipeline,blurPipeline,presentPipeline,depthPipeline})
+                 reflectSkyPipeline,reflectWorldPipeline,emissionPipeline,blurPipeline,presentPipeline,depthPipeline,settingsPipeline})
         if(!p)return false;
     return true;
 }
@@ -278,7 +280,8 @@ void reserve(Arena &arena,Uint32 bytes,SDL_GPUBufferUsageFlags usage) {
     if(!arena.buffer)I_Error((char*)"Could not allocate GPU buffer: %s",SDL_GetError());
 }
 void uploadFrame(SDL_GPUCommandBuffer *command,const std::vector<const std::vector<Vertex>*> &transient,
-                 const std::vector<std::array<float,4>> &sectors,const unsigned *palette,const std::vector<unsigned> &hud) {
+                 const std::vector<std::array<float,4>> &sectors,const unsigned *palette,const std::vector<unsigned> &hud,
+                 const std::vector<unsigned> &panel) {
     vertexOffsets.clear();Uint32 bytes=0;
     auto place=[&](const std::vector<Vertex> &vertices) {
         if(vertices.empty())return;
@@ -296,7 +299,7 @@ void uploadFrame(SDL_GPUCommandBuffer *command,const std::vector<const std::vect
     reserve(blockerArena,blockerBytes,SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     reserve(sectorArena,sectorBytes,SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     Uint32 imageOffset=vertexBytes+blockerBytes+sectorBytes,hudBytes=(Uint32)(hud.size()*4);
-    Uint32 total=imageOffset+1024+hudBytes;
+    Uint32 panelBytes=(Uint32)(panel.size()*4),total=imageOffset+1024+hudBytes+panelBytes;
     if(!frameTransfer||frameTransferCapacity<total) {
         if(frameTransfer)SDL_ReleaseGPUTransferBuffer(device,frameTransfer);
         frameTransferCapacity=std::max<Uint32>(262144,total+total/2);
@@ -311,6 +314,7 @@ void uploadFrame(SDL_GPUCommandBuffer *command,const std::vector<const std::vect
     memcpy(mapped+vertexBytes+blockerBytes,sectors.data(),sectorBytes);
     memcpy(mapped+imageOffset,palette,1024);
     memcpy(mapped+imageOffset+1024,hud.data(),hudBytes);
+    if(panelBytes)memcpy(mapped+imageOffset+1024+hudBytes,panel.data(),panelBytes);
     SDL_UnmapGPUTransferBuffer(device,frameTransfer);
     SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(command);
     auto send=[&](Uint32 offset,SDL_GPUBuffer *buffer,Uint32 size) {
@@ -328,6 +332,7 @@ void uploadFrame(SDL_GPUCommandBuffer *command,const std::vector<const std::vect
     };
     image(imageOffset,paletteTexture,256,1);
     image(imageOffset+1024,hudTexture,SCREENWIDTH,SCREENHEIGHT);
+    if(panelBytes)image(imageOffset+1024+hudBytes,settingsTexture,DOOM_SETTINGS_WIDTH,DOOM_SETTINGS_HEIGHT);
     SDL_EndGPUCopyPass(copy);
 }
 void drawVertices(SDL_GPURenderPass *pass,const std::vector<Vertex> &vertices) {
@@ -437,6 +442,11 @@ void drawOverlays(SDL_GPUCommandBuffer *command,SDL_GPURenderPass *pass,const Fr
         SDL_BindGPUGraphicsPipeline(pass,depth?solidPipeline:overlaySolidPipeline);drawVertices(pass,cross);
     }
 }
+// The in-game settings panel: a quad over the whole drawable whose texture
+// coordinates place the 640x400 image at a whole-pixel scale in the middle;
+// beyond it the clamped border texels dim the view.
+std::vector<Vertex> settingsQuad;
+float settingsOrigin[2]={},settingsScale=1;
 void present(SDL_GPUCommandBuffer *command,SDL_GPUTexture *target,const FrameView &view) {
     SDL_GPUColorTargetInfo info={};
     info.texture=target;info.load_op=SDL_GPU_LOADOP_DONT_CARE;info.store_op=SDL_GPU_STOREOP_STORE;
@@ -448,6 +458,12 @@ void present(SDL_GPUCommandBuffer *command,SDL_GPUTexture *target,const FrameVie
     SDL_GPUTextureSamplerBinding samplers[]={{colorTexture,linearClamp},{bloomTexture,linearClamp},{hudTexture,linearClamp},{paletteLUT,nearestClamp}};
     SDL_BindGPUFragmentSamplers(pass,0,samplers,4);
     SDL_DrawGPUPrimitives(pass,3,1,0,0);
+    if(!settingsQuad.empty()) {
+        SDL_BindGPUGraphicsPipeline(pass,settingsPipeline);
+        SDL_GPUTextureSamplerBinding panel={settingsTexture,nearestClamp};
+        SDL_BindGPUFragmentSamplers(pass,0,&panel,1);
+        drawVertices(pass,settingsQuad);
+    }
     SDL_EndGPURenderPass(pass);
 }
 void capture(SDL_GPUCommandBuffer *command,const FrameView &view,int w,int h) {
@@ -563,13 +579,14 @@ int I_Render3DInit(SDL_Window *window) {
     detailSampler=SDL_CreateGPUSampler(device,&detailInfo);
     if(!linearRepeat||!linearClamp||!nearestClamp||!detailSampler||!createPipelines()) {I_Render3DShutdown();return 0;}
     hudTexture=createTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,SCREENWIDTH,SCREENHEIGHT,SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    settingsTexture=createTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,DOOM_SETTINGS_WIDTH,DOOM_SETTINGS_HEIGHT,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     paletteTexture=createTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,256,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     dummySeam=createTexture(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     dummyContact=createTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     dummyBake=createTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     solidTexel=createTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     detailTexture=createDetailTexture();
-    if(!hudTexture||!paletteTexture||!dummySeam||!dummyContact||!dummyBake||!solidTexel||!detailTexture) {I_Render3DShutdown();return 0;}
+    if(!settingsTexture||!hudTexture||!paletteTexture||!dummySeam||!dummyContact||!dummyBake||!solidTexel||!detailTexture) {I_Render3DShutdown();return 0;}
     std::array<byte,8> zero={};const byte covered[4]={0,255,0,255}; // Index 0, full coverage, no emission.
     upload(dummySeam,1,1,1,zero.data(),8,1);upload(dummyContact,1,1,1,zero.data(),4,1);upload(dummyBake,1,1,1,zero.data(),4,1);
     upload(solidTexel,1,1,1,covered,4,1);
@@ -586,10 +603,11 @@ void I_Render3DShutdown(void) {
     sceneShutdown();
     flushUploads();
     releaseTargets();release(reflectionTexture);release(reflectionDepth);reflectionWidth=reflectionHeight=0;width=height=0;
-    for(SDL_GPUTexture **t:{&hudTexture,&paletteTexture,&paletteLUT,&dummySeam,&dummyContact,&dummyBake,&solidTexel,&detailTexture})release(*t);
+    for(SDL_GPUTexture **t:{&settingsTexture,&hudTexture,&paletteTexture,&paletteLUT,&dummySeam,&dummyContact,&dummyBake,&solidTexel,&detailTexture})release(*t);
     for(SDL_GPUGraphicsPipeline **p:{&opaquePipeline,&skyPipeline,&skySurfacePipeline,&reflectSkySurfacePipeline,&worldPipeline,&shadowPipeline,&decalPipeline,&particlePipeline,&heatPipeline,
             &weaponPipeline,&hudPipeline,&solidPipeline,&mistPipeline,&shaftPipeline,&overlayWeaponPipeline,&overlayHudPipeline,&overlaySolidPipeline,
-            &reflectOpaquePipeline,&reflectSkyPipeline,&reflectWorldPipeline,&emissionPipeline,&blurPipeline,&presentPipeline,&depthPipeline})
+            &reflectOpaquePipeline,&reflectSkyPipeline,&reflectWorldPipeline,&emissionPipeline,&blurPipeline,&presentPipeline,&depthPipeline,
+            &settingsPipeline})
         release(*p);
     for(SDL_GPUSampler **s:{&linearRepeat,&linearClamp,&nearestClamp,&detailSampler})release(*s,SDL_ReleaseGPUSampler);
     for(Arena *a:{&vertexArena,&blockerArena,&sectorArena}) {release(a->buffer,SDL_ReleaseGPUBuffer);a->capacity=0;}
@@ -624,7 +642,19 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
     std::vector<Vertex> cross=crosshairVertices(view.worldW,view.worldH);
     std::vector<const std::vector<Vertex>*> transient={&hud,&cross};
     for(const auto &draw:weapons)transient.push_back(&draw.vertices);
-    uploadFrame(command,transient,sectorInfo(),palette,overlay);
+    std::vector<unsigned> settingsImage;settingsQuad.clear();
+    if(I_Render3DSettingsOpen()) {
+        settingsImage.assign((size_t)DOOM_SETTINGS_WIDTH*DOOM_SETTINGS_HEIGHT,0);
+        I_Render3DSettingsDraw(settingsImage.data());
+        float dw=(float)drawableWidth,dh=(float)drawableHeight;
+        settingsScale=std::max(1.0f,std::floor(std::min(dw/DOOM_SETTINGS_WIDTH,dh/DOOM_SETTINGS_HEIGHT)));
+        float pw=DOOM_SETTINGS_WIDTH*settingsScale,ph=DOOM_SETTINGS_HEIGHT*settingsScale;
+        settingsOrigin[0]=std::floor((dw-pw)/2);settingsOrigin[1]=std::floor((dh-ph)/2);
+        screenQuad(settingsQuad,-1,1,2,2,-settingsOrigin[0]/pw,-settingsOrigin[1]/ph,
+                   (dw-settingsOrigin[0])/pw,(dh-settingsOrigin[1])/ph);
+        transient.push_back(&settingsQuad);
+    }
+    uploadFrame(command,transient,sectorInfo(),palette,overlay,settingsImage);
     // Liquid reflections: the world drawn again at reduced resolution from a
     // camera mirrored at the liquid height, clipped to above the surface.
     camera.water[2]=0;
@@ -758,30 +788,9 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
     updateTitle(w,h,renderer);
 }
 
-#ifndef __APPLE__
-// A minimal settings prompt until an in-game options menu replaces it; macOS
-// uses the native dialog in i_mac_settings.mm.
-void I_Render3DSettings(void) {
-    bool wasPaused=paused;paused=true;
-    SDL_SetWindowRelativeMouseMode(gameWindow,false);
-    const SDL_MessageBoxButtonData buttons[]={
-        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT|SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT,0,"Done"},
-        {0,1,"3D / Classic"},{0,2,"Resolution"},{0,3,"Effects on/off"},{0,4,"Reset"}};
-    char text[512];
-    snprintf(text,sizeof(text),"Renderer: %s\nResolution: %d%%\nEffects (emissive, fog, reflections, detail): %s\n\n"
-        "All options, including field of view and sprite filtering, are in graphics.cfg next to the game.",
-        settings.accelerated?"3D":"Classic",settings.scale,settings.emissive&&settings.fog?"on":"off");
-    SDL_MessageBoxData box={SDL_MESSAGEBOX_INFORMATION,gameWindow,"Graphics",text,SDL_arraysize(buttons),buttons,nullptr};
-    int choice=0;SDL_ShowMessageBox(&box,&choice);paused=wasPaused;
-    if(choice==1)settings.accelerated=!settings.accelerated;
-    else if(choice==2)settings.scale=settings.scale==100?75:settings.scale==75?50:100;
-    else if(choice==3) {
-        int on=!(settings.emissive&&settings.fog);
-        settings.emissive=settings.fog=settings.reflections=settings.detail=settings.softLight=on;
-        settings.blood=settings.bloodShine=settings.flashlightShadows=settings.softSprites=settings.heatHaze=settings.eyeAdaptation=on;
-        settings.splashes=settings.dust=settings.playerShadow=settings.doorLight=settings.texelLight=on;
-        settings.skyLight=settings.bakedAO=settings.thingShadows=settings.lightFlow=settings.ceilingCaustics=settings.glossyScreens=settings.sunShafts=settings.sunDisc=on;
-    } else if(choice==4)settings=Settings{};
-    settingsChanged();
+void I_Render3DSettingsMouse(float x,float y,int button) {
+    float density=gameWindow?SDL_GetWindowPixelDensity(gameWindow):1;
+    if(density<=0)density=1;
+    float px=(x*density-settingsOrigin[0])/settingsScale,py=(y*density-settingsOrigin[1])/settingsScale;
+    I_Render3DSettingsClick((int)std::floor(px),(int)std::floor(py),button);
 }
-#endif

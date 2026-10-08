@@ -153,6 +153,15 @@ void I_StartTic(void)
             SDL_Scancode scan = event.key.scancode;
             if (scan < 0 || scan >= SDL_SCANCODE_COUNT)
                 continue;
+#ifdef DOOM_RENDER3D
+            /* The in-game F4 panel takes the keyboard, key repeat included. */
+            if (accel && I_Render3DSettingsOpen() && scan != SDL_SCANCODE_F7)
+            {
+                if (event.type == SDL_EVENT_KEY_DOWN)
+                    I_Render3DSettingsKey(scan, (event.key.mod & SDL_KMOD_SHIFT) != 0);
+                continue;
+            }
+#endif
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.repeat)
                 continue;
             if (event.type == SDL_EVENT_KEY_DOWN &&
@@ -210,6 +219,22 @@ void I_StartTic(void)
             if (accel) I_Render3DLook(event.motion.yrel);
 #endif
         }
+#ifdef DOOM_RENDER3D
+        else if (accel && I_Render3DSettingsOpen() && event.type == SDL_EVENT_MOUSE_MOTION)
+            I_Render3DSettingsMouse(event.motion.x, event.motion.y, 0);
+        else if (accel && I_Render3DSettingsOpen() &&
+                 (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP))
+        {
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+                I_Render3DSettingsMouse(event.button.x, event.button.y,
+                                        event.button.button == SDL_BUTTON_RIGHT ? 3 : 1);
+        }
+        else if (accel && I_Render3DSettingsOpen() && event.type == SDL_EVENT_MOUSE_WHEEL)
+        {
+            if (event.wheel.y != 0)
+                I_Render3DSettingsKey(event.wheel.y > 0 ? SDL_SCANCODE_UP : SDL_SCANCODE_DOWN, 0);
+        }
+#endif
         else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP)
         {
             int mask = event.button.button == SDL_BUTTON_LEFT ? 1

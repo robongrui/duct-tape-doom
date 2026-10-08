@@ -22,6 +22,7 @@ resources="$output_app/Contents/Resources"
 mkdir -p "$resources/Licenses"
 cp "$project_dir/LICENSE.TXT" "$resources/Licenses/DOOM-GPL-2.txt"
 cp "$project_dir/third_party/xbr/LICENSE.txt" "$resources/Licenses/Hyllian-xBR.txt"
+cp "$project_dir/third_party/spleen/LICENSE.txt" "$resources/Licenses/Spleen-font.txt"
 cp "$project_dir/PLAY.md" "$resources/PLAY.md"
 if [ -f "$build_dir/_deps/nukedopl3-src/LICENSE" ]; then
     cp "$build_dir/_deps/nukedopl3-src/LICENSE" "$resources/Licenses/Nuked-OPL3-LGPL-2.1.txt"

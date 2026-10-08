@@ -3400,7 +3400,9 @@ FrameView prepareFrame(int w,int h) {
     camera.map[3]=settings.softLight&&seamTexture&&worldPending;
     camera.materials[2]=settings.fog&&worldPending;
     camera.materials[3]=settings.palette&&worldPending;
-    camera.materials[1]=settings.emissive&&worldPending&&camera.effects[2]==0;
+    // No bloom while the in-game settings panel covers the view: it would glow
+    // through the dimmed backdrop and soften the panel's text.
+    camera.materials[1]=settings.emissive&&worldPending&&camera.effects[2]==0&&!I_Render3DSettingsOpen();
     camera.fx[0]=1;
     // Detail textures: smooth grain with smooth walls and floors, stepped
     // grain over crisp pixels only when asked for.

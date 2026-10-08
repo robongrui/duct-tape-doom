@@ -118,6 +118,7 @@ Third-party components keep their own licenses:
 - [SDL3](https://libsdl.org/) — zlib license (downloaded at build time)
 - [Nuked OPL3](https://github.com/nukeykt/Nuked-OPL3) — LGPL-2.1+ (downloaded at build time)
 - xBR pixel-art scaling by Hyllian — MIT, see [third_party/xbr/LICENSE.txt](third_party/xbr/LICENSE.txt)
+- [Spleen](https://github.com/fcambus/spleen) 8x16 font by Frederic Cambus, used by the in-game settings panel — BSD 2-Clause, see [third_party/spleen/LICENSE.txt](third_party/spleen/LICENSE.txt)
 
 DOOM is a trademark of id Software. This project is not affiliated with or
 endorsed by id Software, ZeniMax or Bethesda.
