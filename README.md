@@ -9,7 +9,6 @@ downloaded, and the result is meant to still feel like DOOM.
 Development was heavily assisted by Claude. I designed the rendering
 approach, constraints and features, tested the results, and iterated on the
 implementation; Claude was used extensively for writing and modifying code.
-This is not an autonomous "prompt-to-project" build.
 
 The default settings are how I prefer to play DOOM; everything else can be
 switched in the graphics panel (F4).
