@@ -13,6 +13,12 @@ With no WADs in the `wads` folder, Freedoom starts. With a base game (such as
 `doom.wad` or `doom2.wad`) and a custom map WAD, the map is loaded on top of the
 game. Controls and options are in `PLAY.md`.
 
+**macOS:** the app is not notarized by Apple, so the first launch is blocked
+with "Apple could not verify…". Click **Done**, open **System Settings → Privacy &
+Security**, scroll down and click **Open Anyway** next to the message about
+Play DOOM, then confirm. After that it opens normally. (Alternatively, run
+`xattr -dr com.apple.quarantine "Play DOOM.app"` in Terminal.)
+
 **Windows:** the program is not code-signed, so SmartScreen may say "Windows
 protected your PC". Click **More info**, then **Run anyway**.
 

@@ -123,7 +123,7 @@ jobs:
             fi
             xcrun stapler staple "$app"
           else
-            echo "::warning::No signing secrets set; the Mac app is not notarized and macOS will block it."
+            echo "No signing secrets set; the Mac app is signed ad hoc and not notarized."
           fi
           ditto -c -k --keepParent "$app" dist/DuctTapeDOOM-mac.zip
 

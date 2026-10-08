@@ -316,7 +316,9 @@ workflow by hand from the Actions tab builds the same downloads as artifacts
 without publishing a release. The text of the release page is
 `.github/release-notes.md`.
 
-The Mac app is signed with a Developer ID and notarized when these repository
+By default the Mac app is only signed ad hoc, and players allow it once under
+System Settings → Privacy & Security (the release notes explain how). It is
+signed with a Developer ID and notarized instead when these optional repository
 secrets are set (Settings → Secrets and variables → Actions):
 
 | Secret | Value |
@@ -327,8 +329,6 @@ secrets are set (Settings → Secrets and variables → Actions):
 | `APPLE_APP_PASSWORD` | An app-specific password from [account.apple.com](https://account.apple.com) → Sign-In and Security |
 | `APPLE_TEAM_ID` | The 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership details |
 
-Without them, the release still builds, but macOS blocks the downloaded app
-until the player allows it under System Settings → Privacy & Security.
 
 ## Requirements
 
