@@ -573,8 +573,10 @@ void buildSurfaceMaps(float minx,float miny,float maxx,float maxy) {
     if(!seamTexture||!contactTexture)I_Error((char*)"Could not allocate surface maps");
     fprintf(stderr,"3D surface maps: %dx%d cells of %.0f units.\n",mapWidth,mapHeight,mapCell);
 }
-// Caustics on walls near liquids: map cells hold the liquid's tint (rgb, at
-// full brightness) and a proximity (a). It spreads through open cells whose
+// Caustics on walls near liquids: map cells hold the liquid's sector (r, and
+// g's low 7 bits), whether it glows by itself (g's top bit: nukage, slime,
+// lava), its tint at full brightness in 3-3-2 bits (b) and a proximity (a),
+// so the shader can follow the light on the water as it changes. It spreads through open cells whose
 // floors sit near the liquid surface, so ledges and closed doors stop it;
 // void cells take their strongest neighbor for the walls on their boundary. The pattern
 // is the high-passed luminance of the level's most common liquid flat, so the
@@ -612,10 +614,13 @@ void buildCaustics() {
     }
     std::vector<uint8_t> cells(count*4,0);
     for(size_t i=0;i<count;++i) {
-        if(source[i]<0)continue;
-        const auto &color=sectorMist[source[i]].color;
+        if(source[i]<0||source[i]>=32768)continue;
+        const auto &mist=sectorMist[source[i]];const auto &color=mist.color;
         float peak=std::max({color[0],color[1],color[2],0.01f}),proximity=1-distance[i]/causticRange;
-        for(int c=0;c<3;++c)cells[4*i+c]=(uint8_t)std::lround(std::clamp(color[c]/peak,0.0f,1.0f)*255);
+        auto level=[&](int c,int steps){return (int)std::lround(std::clamp(color[c]/peak,0.0f,1.0f)*steps);};
+        cells[4*i]=(uint8_t)(source[i]&255);
+        cells[4*i+1]=(uint8_t)((source[i]>>8)|(mist.toxic||mist.hot?128:0));
+        cells[4*i+2]=(uint8_t)(level(0,7)<<5|level(1,7)<<2|level(2,3));
         cells[4*i+3]=(uint8_t)std::lround(proximity*proximity*255);
     }
     std::vector<uint8_t> dilated=cells;

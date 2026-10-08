@@ -308,24 +308,47 @@ float flowLight(vec3 world,vec3 normal,uint sector,float light) {
 }
 // Walls: liquids sit in pits, so the light plays on their sides. Two
 // copies of the pattern drift across each other in whole texels at the tic
-// rate, one texel per unit like the flats; their crossings flare. Walls
-// sample one cell toward their visible side and fade with height above
-// their floor. Ceilings (flag 16) take the pattern in map space and fade as
-// their sector gets taller.
-vec3 caustics(vec3 world,vec3 normal,uint sector,float light) {
+// rate, one texel per unit like the flats; only their crossings flare, over
+// black. Walls sample one cell toward their visible side and fade with
+// height above their floor. Ceilings (flag 16) take the pattern in map
+// space and fade as their sector gets taller.
+// The ripples are light thrown up by the water, so they follow the light on
+// the liquid's sector, not the wall's: nothing below mid levels, full in
+// bright rooms. Nukage, slime and lava glow by themselves and keep a weak
+// ripple. The flashlight (light 0, a cone) adds its own: a flat surface
+// mirrors the wall point below the water, and where the beam toward that
+// mirror image meets the water over a liquid cell, the reflection lands here.
+// The water loses little of the beam and focuses it, so crossings can outshine
+// the beam itself.
+vec3 caustics(vec3 world,vec3 normal,uint sector) {
     bool ceiling=normal.z<-0.5;
     vec2 at=ceiling?world.xy:world.xy+normal.xy/c.map.z;
-    vec4 cell=textureLod(causticMap,(at-c.map.xy)*c.map.z/vec2(textureSize(causticMap,0)),0.0);
-    if(cell.a<0.004) return vec3(0);
+    ivec2 mapSize=textureSize(causticMap,0);
+    vec2 g=(at-c.map.xy)*c.map.z;
+    float proximity=textureLod(causticMap,g/vec2(mapSize),0.0).a;
+    if(proximity<0.004) return vec3(0);
+    uvec4 cell=uvec4(round(texelFetch(causticMap,clamp(ivec2(floor(g)),ivec2(0),mapSize-1),0)*255.0));
+    if(cell.a==0u) return vec3(0);
+    vec4 water=sectorInfo[cell.r|((cell.g&127u)<<8)];
+    vec3 tint=vec3(float(cell.b>>5)/7.0,float((cell.b>>2)&7u)/7.0,float(cell.b&3u)/3.0);
+    vec3 drive=vec3(max(smoothstep(0.5,0.9,water.x),(cell.g&128u)!=0u?0.3:0.0));
+    if(flashCount>0u&&lights[0].direction.w>0.0&&world.z>water.y&&lights[0].position.z>water.y) {
+        vec3 from=lights[0].position.xyz,mirrored=vec3(world.xy,2.0*water.y-world.z);
+        vec3 surface=mix(from,mirrored,(from.z-water.y)/(from.z-mirrored.z));
+        ivec2 below=clamp(ivec2(floor((surface.xy-c.map.xy)*c.map.z)),ivec2(0),mapSize-1);
+        if(texelFetch(causticMap,below,0).a>0.95&&dot(normal,surface-world)>0.0)
+            drive+=lights[0].color.rgb*flashAt(surface,0u)*1.5;
+    }
+    if(max(drive.r,max(drive.g,drive.b))<0.004) return vec3(0);
     vec4 info=sectorInfo[sector];
     float fade=ceiling?1.0-smoothstep(32.0,224.0,info.z-info.y):1.0-smoothstep(0.0,96.0,world.z-info.y);
     ivec2 p=ceiling?ivec2(floor(world.xy)):ivec2(floor(vec2(dot(world.xy,vec2(-normal.y,normal.x)),-world.z)));
     ivec2 size=textureSize(causticPattern,0);
     float tic=floor(c.fog.w*35.0);
-    float a=texelFetch(causticPattern,wrapTexel(p+ivec2(floor(tic*vec2(0.23,0.14))),size),0).r;
-    float b=texelFetch(causticPattern,wrapTexel(ivec2(p.y,-p.x)+ivec2(floor(tic*vec2(-0.17,0.2))),size),0).r;
-    float ripple=round(saturate(a*b*2.0+(a+b)*0.25)*4.0)/4.0;
-    return cell.rgb*ripple*cell.a*fade*0.3*(0.35+0.65*saturate(light));
+    float a=texelFetch(causticPattern,wrapTexel(p+ivec2(floor(tic*vec2(0.115,0.07))),size),0).r;
+    float b=texelFetch(causticPattern,wrapTexel(ivec2(p.y,-p.x)+ivec2(floor(tic*vec2(-0.085,0.1))),size),0).r;
+    float ripple=round(saturate(a*b*2.5)*4.0)/4.0;
+    return tint*ripple*proximity*fade*0.45*min(drive,vec3(3.0));
 }
 void main() {
     bool sprite=(vMode&2u)!=0u;
@@ -572,7 +595,7 @@ void main() {
     }
     // Glowing texels stay clean of the detail grain.
     color.rgb=color.rgb*mix(grain,1.0,emission)*illumination+specular;
-    if(mapped&&(bakeFlags&4u)!=0u&&(abs(normal.z)<=0.5||(normal.z<-0.5&&(bakeFlags&16u)!=0u))) color.rgb+=caustics(vWorld,normal,sector,light);
+    if(mapped&&(bakeFlags&4u)!=0u&&(abs(normal.z)<=0.5||(normal.z<-0.5&&(bakeFlags&16u)!=0u))) color.rgb+=caustics(vWorld,normal,sector);
     if((vMode&32u)!=0u&&c.water.z>0.0&&c.effects.z==0.0) {
         // The mirrored camera maps the surface to the same screen point; a
         // scrolling wobble distorts it, and grazing views reflect more.
