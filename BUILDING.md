@@ -268,12 +268,14 @@ SDL_gpu cannot sample integer textures, so the light-seam map is uploaded as
 16-bit UNORM and converted back exactly in the shader. Without depth resolves,
 soft mist under MSAA reads a single-sample depth prepass.
 
-F4 opens the native settings dialog on macOS and a small prompt (renderer,
-resolution, effects, reset) on Linux and Windows; there, the remaining options
-are in `graphics.cfg`. `-gpudebug` enables SDL_gpu validation and `-gpumsaa 1`
-forces single-sample rendering. The window title names the active driver.
+F4 opens the in-game settings panel on every platform. Its options are listed
+in `platform/settings_panel.cpp`, grouped into tabs; `platform/settings_menu.cpp`
+draws the panel into a 640x400 image in the Spleen 8x16 font, which the renderer
+scales by whole pixels in the final pass so it stays sharp at any render
+resolution. `-gpudebug` enables SDL_gpu validation and `-gpumsaa 1` forces
+single-sample rendering. The window title names the active driver.
 
-The dialog's Performance section (both off by default, both need baked static
+The panel's Performance tab (both off by default, both need baked static
 lights) trades per-frame light work for level-load bakes.
 `bake_only_lights 1` takes torches, lamps and glowing textures out of the
 dynamic light list. The bake then also records per texel where that light

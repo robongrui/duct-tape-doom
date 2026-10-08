@@ -79,20 +79,17 @@ no reflected world lights. Aiming into sky produces no tint.
 Launch with `-flashlight` to start with the light on. `-flashlighttint 0` disables
 the tint, `-flashlighttint 1` selects the default, and `-flashlighttint 2` makes it stronger.
 
-Press **F4** for the graphics panel. Its options are sorted into tabs, and
-options that only refine another one are greyed out while that one is off.
+Press **F4** for the graphics panel. It opens inside the game as a text-mode
+style panel over the paused, dimmed view. Its options are sorted into tabs, the
+description of the highlighted option is shown at the bottom, and options that
+only refine another one are greyed out while that one is off.
 
-- **On the Mac** it is a window: hover over an option for a short description.
-  It reopens on the tab you used last.
-- **On Windows and Linux** it opens inside the game as a text-mode style panel
-  over the paused, dimmed view, with the description of the highlighted option
-  at the bottom. Use **Up/Down** (or the mouse wheel) to choose an option,
-  **Left/Right** or **Return** to change it, **Tab** (or **1**–**5**) to switch
-  tabs, **R** to restore the defaults, and **Esc** or **F4** to close the panel
-  and apply the changes. The mouse works too: click an option to change it
-  (right-click goes backwards), click a slider to set it, and click a tab to
-  open it. **F7** still takes a screenshot. Start the Mac app with
-  `-ingamesettings` to use this panel there too.
+Use **Up/Down** (or the mouse wheel) to choose an option, **Left/Right** or
+**Return** to change it, **Tab** (or **1**–**5**) to switch tabs, **R** to
+restore the defaults, and **Esc** or **F4** to close the panel and apply the
+changes. The mouse works too: click an option to change it (right-click goes
+backwards), click a slider to set it, and click a tab to open it. **F7** still
+takes a screenshot.
 
 **Display**
 

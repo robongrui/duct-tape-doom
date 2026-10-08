@@ -1,8 +1,6 @@
-/* The in-game F4 graphics panel, used on Windows and Linux and on the Mac with
- * -ingamesettings. It draws into its own 640x400 image in the 8x16 Spleen font,
- * like a text-mode setup program; the renderer scales it by whole pixels over
- * the dimmed view. Same tabs and options as the Mac dialog; changes apply when
- * the panel closes. */
+/* The in-game F4 graphics panel. It draws into its own 640x400 image in the
+ * 8x16 Spleen font, like a text-mode setup program; the renderer scales it by
+ * whole pixels over the dimmed view. Changes apply when the panel closes. */
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -275,6 +273,4 @@ void I_Render3DSettingsDraw(unsigned *pixels) {
     fill(0,0,1,height,backdrop);fill(width-1,0,1,height,backdrop);
 }
 
-#ifndef __APPLE__
 void I_Render3DSettings(void) { I_Render3DSettingsMenu(); }
-#endif

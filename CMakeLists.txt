@@ -154,12 +154,6 @@ if(DOOM_BUILD_SDL)
             platform/settings_menu.cpp)
         set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
         target_compile_definitions(${target} PRIVATE DOOM_RENDER3D)
-        if(APPLE)
-            target_sources(${target} PRIVATE platform/i_mac_settings.mm)
-            set_source_files_properties(platform/i_mac_settings.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-D_DARWIN_C_SOURCE")
-            set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED YES)
-            target_link_libraries(${target} PRIVATE "-framework Cocoa")
-        endif()
     endfunction()
     add_executable(doom MACOSX_BUNDLE platform/sdl_main.c platform/i_sdl_video.c
         platform/i_sdl_sound.c platform/i_opl_music.c platform/i_singleplayer.c
@@ -174,6 +168,7 @@ if(DOOM_BUILD_SDL)
         target_link_libraries(doom PRIVATE "-framework AudioToolbox" "-framework CoreFoundation" "-framework Cocoa")
         set_target_properties(doom PROPERTIES
             OUTPUT_NAME "Play DOOM"
+            OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED YES
             MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.robongrui.duct-tape-doom"
             MACOSX_BUNDLE_BUNDLE_NAME "Play DOOM"
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/platform/Info.plist.in")
