@@ -18,6 +18,7 @@ env:
 
 jobs:
   package:
+    name: package (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
