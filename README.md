@@ -6,10 +6,13 @@ GPU renderer that builds a 3D scene from the WAD at runtime. Every effect is
 derived from the unmodified game data: nothing is replaced, converted or
 downloaded, and the result is meant to still feel like DOOM.
 
-This port was built with Claude, but that doesn't mean Claude made it: every
-effect was tuned by hand and chosen deliberately. The default settings are
-how I prefer to play DOOM; everything else can be switched in the graphics
-panel (F4).
+Development was heavily assisted by Claude. I designed the rendering
+approach, constraints and features, tested the results, and iterated on the
+implementation; Claude was used extensively for writing and modifying code.
+This is not an autonomous "prompt-to-project" build.
+
+The default settings are how I prefer to play DOOM; everything else can be
+switched in the graphics panel (F4).
 
 Most of the effects are here because I liked them in other old games. Few of
 them are actually modern; they are fake-modern, cheap tricks that look the
