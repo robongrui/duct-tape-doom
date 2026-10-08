@@ -458,9 +458,12 @@ void partition(unsigned node,const std::vector<Point> &poly,int depth=0) {
     partition(n.children[0],clip(poly,origin,direction,true),depth+1);
     partition(n.children[1],clip(poly,origin,direction,false),depth+1);
 }
-bool liquidFlat(const char *name) {
-    return !strncmp(name,"NUKAGE",6)||!strncmp(name,"FWATER",6)||!strncmp(name,"SLIME",5)||
-           !strncmp(name,"BLOOD",5)||!strncmp(name,"LAVA",4);
+// Liquids are the liquid-named flats the engine animates: Doom 2's SLIME13-16
+// share the name but are still metal floors (MAP04's courtyard).
+bool liquidFlat(int pic) {
+    const char *name=lumpinfo[firstflat+pic].name;int next;
+    return (!strncmp(name,"NUKAGE",6)||!strncmp(name,"FWATER",6)||!strncmp(name,"SLIME",5)||
+            !strncmp(name,"BLOOD",5)||!strncmp(name,"LAVA",4))&&P_PicAnimationNext(false,pic,&next)>0;
 }
 void classifySectorMist() {
     sectorMist.assign(numsectors,{});
@@ -479,7 +482,7 @@ void classifySectorMist() {
         }
         mist.pit=hasNeighbor&&lowestNeighbor-units(sector.floorheight)>=24;
         int lump=firstflat+sector.floorpic;
-        mist.liquid=liquidFlat(lumpinfo[lump].name);
+        mist.liquid=liquidFlat(sector.floorpic);
         mist.reflective=mist.liquid&&strncmp(lumpinfo[lump].name,"LAVA",4)!=0;
         mist.toxic=sector.special==4||sector.special==5||sector.special==7||sector.special==11||sector.special==16;
         if(mist.liquid&&W_LumpLength(lump)>=4096) {
