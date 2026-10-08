@@ -4,6 +4,14 @@ Double-click **Play DOOM.app**. No installation is needed, and you can move
 the app to Applications. If you have the source code rather than the app,
 build it first as described in [BUILDING.md](BUILDING.md).
 
+**On Windows and Linux**, put your `.wad` files into the `wads` folder next to
+`doom.exe` (or `doom`) and start the game. Base games are found automatically;
+with several, the game asks which one to play, and also offers the included
+Freedoom. One custom map WAD in the folder is loaded on top of the base game;
+with several, the game asks. A `.deh` or `.bex` patch with the same name as the
+map is applied too. With no WADs in the folder, Freedoom starts. The rules below
+are the same on the Mac.
+
 At startup, choose **Choose WAD Folder…**, then select the folder directly
 containing your `.wad` files. The loader finds base games and custom WADs;
 if there are several, it asks which one to play. Put the required DOOM or

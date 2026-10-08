@@ -2,6 +2,7 @@
 /build/
 /Play DOOM.app/
 /CMakeUserPresets.json
+/dist/
 *.o
 *.obj
 *.exe

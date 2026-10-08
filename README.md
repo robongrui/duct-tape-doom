@@ -22,9 +22,18 @@ downloaded, and the result is meant to still feel like DOOM.
 Multiplayer is not implemented. The Mac build is the most tested; Linux and
 Windows builds compile in CI but have seen little real play.
 
+## Download and play
+
+Ready-to-play builds for macOS, Windows and Linux are on the
+[Releases page](https://github.com/robongrui/duct-tape-doom/releases). Each
+includes Freedoom, so it plays straight away. On Windows and Linux, drop your
+own `.wad` files into the `wads` folder next to the game; on the Mac, choose
+your WAD folder when the app starts.
+
 ## Game data
 
-This repository contains **no game data**. You need an IWAD to play:
+This repository contains **no game data**. To build and play from source you
+need an IWAD:
 
 - **Freedoom** (free): download `freedoom1.wad` or `freedoom2.wad` from
   [freedoom.github.io](https://freedoom.github.io/).

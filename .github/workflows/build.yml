@@ -17,7 +17,7 @@ jobs:
         configuration: [Debug, Release]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} -DBUILD_TESTING=ON
       - name: Build
@@ -28,7 +28,7 @@ jobs:
   linux-sanitizers:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build/ci -DCMAKE_BUILD_TYPE=Debug -DDOOM_ENABLE_SANITIZERS=ON
       - name: Build
@@ -46,7 +46,7 @@ jobs:
         os: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure SDL and the 3D renderer
         run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release -DDOOM_BUILD_SDL=ON
       - name: Build playable app
@@ -61,13 +61,14 @@ jobs:
         os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install SDL build dependencies
         if: runner.os == 'Linux'
         run: >
           sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev
-          libxcursor-dev libxi-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols
-          libegl-dev libasound2-dev libpulse-dev glslang-tools spirv-cross
+          libxcursor-dev libxi-dev libxss-dev libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev
+          wayland-protocols libdecor-0-dev libegl-dev libdrm-dev libgbm-dev libudev-dev libdbus-1-dev
+          libasound2-dev libpulse-dev glslang-tools spirv-cross
       - name: Configure SDL and the SDL_gpu renderer
         run: cmake -S . -B build/native -DCMAKE_BUILD_TYPE=Release -DDOOM_BUILD_SDL=ON
       - name: Build playable app
@@ -78,7 +79,7 @@ jobs:
   historical-linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install X11 development files
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev
       - name: Configure

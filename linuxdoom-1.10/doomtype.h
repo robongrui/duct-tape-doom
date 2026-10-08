@@ -42,6 +42,11 @@ typedef unsigned char byte;
 #include <stddef.h>
 #include <limits.h>
 
+/* MSVC's C library lacks max_align_t; double has its largest fundamental alignment. */
+#if defined(_MSC_VER) && !defined(__clang__)
+typedef double max_align_t;
+#endif
+
 #define MAXCHAR SCHAR_MAX
 #define MAXSHORT INT16_MAX
 #define MAXINT INT32_MAX

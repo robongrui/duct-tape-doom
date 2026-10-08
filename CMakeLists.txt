@@ -10,7 +10,8 @@ option(DOOM_BUILD_X11 "Build the historical Linux X11/OSS executable" OFF)
 option(DOOM_BUILD_SDL "Build the native playable SDL3 app" OFF)
 option(DOOM_RENDER3D "Build the accelerated 3D renderer (SDL_gpu: Metal or Vulkan)" ON)
 option(DOOM_TEST_GPU "Test 3D renderer gameplay (requires a desktop with Metal or Vulkan)" OFF)
-set(DOOM_GAME_DATA "" CACHE FILEPATH "Optional IWAD to bundle with the Mac app")
+set(DOOM_GAME_DATA "" CACHE FILEPATH "Optional IWAD to bundle as the default game")
+set(DOOM_RELEASE_VERSION "0.1.0" CACHE STRING "Release version shown in the Mac app")
 option(DOOM_ENABLE_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 include(CTest)
 include(TestBigEndian)
@@ -115,6 +116,14 @@ add_executable(doom-headless platform/headless_main.c)
 target_link_libraries(doom-headless PRIVATE doom_headless_platform)
 
 if(DOOM_BUILD_SDL)
+    # enable_language() must run at directory scope, not inside the functions
+    # below, and before SDL is added as a subproject.
+    if(DOOM_RENDER3D)
+        enable_language(CXX)
+    endif()
+    if(APPLE)
+        enable_language(OBJCXX)
+    endif()
     find_package(SDL3 3.2 CONFIG QUIET)
     if(NOT SDL3_FOUND)
         include(FetchContent)
@@ -135,13 +144,6 @@ if(DOOM_BUILD_SDL)
     FetchContent_MakeAvailable(NukedOPL3)
     add_library(nuked_opl3 STATIC "${nukedopl3_SOURCE_DIR}/opl3.c")
     target_include_directories(nuked_opl3 PUBLIC "${nukedopl3_SOURCE_DIR}")
-    # enable_language() must run at directory scope, not inside the functions below.
-    if(DOOM_RENDER3D)
-        enable_language(CXX)
-    endif()
-    if(APPLE)
-        enable_language(OBJCXX)
-    endif()
     # The accelerated 3D renderer: SDL_gpu drives Metal on macOS and Vulkan on
     # Linux and Windows (SDL_GPU_DRIVER=vulkan selects MoltenVK on a Mac).
     function(doom_add_renderer target enabled)
@@ -160,17 +162,18 @@ if(DOOM_BUILD_SDL)
     endfunction()
     add_executable(doom MACOSX_BUNDLE platform/sdl_main.c platform/i_sdl_video.c
         platform/i_sdl_sound.c platform/i_opl_music.c platform/i_singleplayer.c
-        platform/i_portable_system.c)
+        platform/i_portable_system.c platform/wad_probe.c)
     target_link_libraries(doom PRIVATE doom_core SDL3::SDL3 nuked_opl3)
     target_compile_definitions(doom PRIVATE DOOM_NATIVE)
+    set_target_properties(doom PROPERTIES WIN32_EXECUTABLE TRUE)
     doom_add_renderer(doom ${DOOM_RENDER3D})
     if(APPLE)
-        target_sources(doom PRIVATE platform/i_mac_music.c platform/i_wad_launcher.mm platform/wad_probe.c)
+        target_sources(doom PRIVATE platform/i_mac_music.c platform/i_wad_launcher.mm)
         set_source_files_properties(platform/i_wad_launcher.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc;-D_DARWIN_C_SOURCE")
         target_link_libraries(doom PRIVATE "-framework AudioToolbox" "-framework CoreFoundation" "-framework Cocoa")
         set_target_properties(doom PROPERTIES
             OUTPUT_NAME "Play DOOM"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "local.doom.modern"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.robongrui.duct-tape-doom"
             MACOSX_BUNDLE_BUNDLE_NAME "Play DOOM"
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/platform/Info.plist.in")
         if(DOOM_GAME_DATA)
@@ -179,6 +182,9 @@ if(DOOM_BUILD_SDL)
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOOM_GAME_DATA}"
                     "$<TARGET_BUNDLE_DIR:doom>/Contents/Resources/default.wad")
         endif()
+    elseif(DOOM_GAME_DATA)
+        add_custom_command(TARGET doom POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOOM_GAME_DATA}" "$<TARGET_FILE_DIR:doom>/default.wad")
     endif()
     if(BUILD_TESTING AND DOOM_GAME_DATA)
         function(doom_add_smoke target renderer)

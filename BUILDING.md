@@ -298,6 +298,38 @@ with Metal, and SDL_gpu with Vulkan through MoltenVK match to within rounding,
 including the flashlight, emissive nukage and HUD. Linux and Windows builds were
 cross-compiled but have not yet been run on those systems.
 
+## Publishing a release
+
+`.github/workflows/release.yml` builds the downloads. Push a version tag to
+publish them as a GitHub pre-release:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Each download bundles Freedoom Phase 1 (fetched and checksum-verified during the
+build) as `default.wad`, plus all licenses. The Mac app is a universal binary
+for macOS 11 and later; Windows uses the static MSVC runtime; Linux is built on
+Ubuntu 22.04 for older glibc. SDL is linked statically everywhere. Running the
+workflow by hand from the Actions tab builds the same downloads as artifacts
+without publishing a release. The text of the release page is
+`.github/release-notes.md`.
+
+The Mac app is signed with a Developer ID and notarized when these repository
+secrets are set (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12` | Your *Developer ID Application* certificate and private key, exported from Keychain Access as `.p12`, then base64-encoded: `base64 -i cert.p12 \| pbcopy` |
+| `MACOS_CERTIFICATE_PASSWORD` | The password chosen when exporting the `.p12` |
+| `APPLE_ID` | The Apple ID email of the developer account |
+| `APPLE_APP_PASSWORD` | An app-specific password from [account.apple.com](https://account.apple.com) → Sign-In and Security |
+| `APPLE_TEAM_ID` | The 10-character Team ID from [developer.apple.com/account](https://developer.apple.com/account) → Membership details |
+
+Without them, the release still builds, but macOS blocks the downloaded app
+until the player allows it under System Settings → Privacy & Security.
+
 ## Requirements
 
 - CMake 3.21 or newer.

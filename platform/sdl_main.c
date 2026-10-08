@@ -41,6 +41,135 @@ static char *companion_patch(const char *wad)
     return NULL;
 }
 
+#ifndef __APPLE__
+#include "wad_probe.h"
+
+#define MAX_CHOICES 8
+
+static int compare_paths(const void *a, const void *b)
+{
+    return SDL_strcasecmp(*(char * const *)a, *(char * const *)b);
+}
+
+static const char *file_name(const char *path)
+{
+    const char *name = path;
+    for (const char *p = path; *p; ++p)
+        if (*p == '/' || *p == '\\') name = p + 1;
+    return name;
+}
+
+static void notice(const char *text)
+{
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "DOOM", text, NULL);
+}
+
+/* Returns an index into paths, -1 for the extra choice, or -2 to quit. */
+static int choose(const char *message, char **paths, int count, const char *extra)
+{
+    SDL_MessageBoxButtonData buttons[MAX_CHOICES + 2];
+    int shown = 0, result = -2;
+    for (int i = 0; i < count; ++i)
+        buttons[shown++] = (SDL_MessageBoxButtonData){ i ? 0 : SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, i, file_name(paths[i]) };
+    if (extra) buttons[shown++] = (SDL_MessageBoxButtonData){ 0, -1, extra };
+    buttons[shown++] = (SDL_MessageBoxButtonData){ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, -2, "Quit" };
+    SDL_MessageBoxData box = { SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT,
+                               NULL, "DOOM", message, shown, buttons, NULL };
+    if (!SDL_ShowMessageBox(&box, &result)) return -2;
+    return result;
+}
+
+/* Windows and Linux: play the WADs dropped into the "wads" folder beside the
+ * program, following the same rules as the Mac launcher. Returns 1 when a game
+ * was chosen, 0 when the folder holds no WADs, and -1 to quit. */
+static int choose_from_folder(const char *base, const char *bundled, char **game, char **addon)
+{
+    char folder[4096];
+    snprintf(folder, sizeof(folder), "%swads", base);
+    int count = 0;
+    char **names = SDL_GlobDirectory(folder, "*.wad", SDL_GLOB_CASEINSENSITIVE, &count);
+    if (!names) return 0;
+    char *bases[MAX_CHOICES], *addons[MAX_CHOICES];
+    int base_count = 0, addon_count = 0, invalid = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        char *path = NULL;
+        doom_wad_info info;
+        if (!SDL_asprintf(&path, "%s/%s", folder, names[i])) continue;
+        if (!DOOM_ProbeWad(path, &info)) invalid = 1;
+        else if (info.is_iwad && (info.episode_maps || info.numbered_maps) && base_count < MAX_CHOICES)
+        { bases[base_count++] = path; continue; }
+        else if (!info.is_iwad && addon_count < MAX_CHOICES)
+        { addons[addon_count++] = path; continue; }
+        SDL_free(path);
+    }
+    SDL_free(names);
+    qsort(bases, (size_t)base_count, sizeof(*bases), compare_paths);
+    qsort(addons, (size_t)addon_count, sizeof(*addons), compare_paths);
+
+    int result = -1;
+    const char *chosen_game = NULL, *chosen_addon = NULL;
+    FILE *file = fopen(bundled, "rb");
+    int has_bundled = file != NULL;
+    if (file) fclose(file);
+    if (!base_count && !addon_count)
+    {
+        if (invalid) notice("The WAD files in the wads folder are damaged or unsupported.");
+        result = invalid ? -1 : 0;
+        goto done;
+    }
+    if (!base_count)
+    {
+        if (!has_bundled)
+        {
+            notice("Custom maps need a base game. Put your DOOM or DOOM II game WAD into the wads folder too.");
+            goto done;
+        }
+        chosen_game = bundled;
+    }
+    else if (base_count == 1 && !has_bundled) chosen_game = bases[0];
+    else
+    {
+        int pick = choose("Choose the game to play.", bases, base_count, has_bundled ? "Freedoom" : NULL);
+        if (pick == -2) goto done;
+        chosen_game = pick == -1 ? bundled : bases[pick];
+    }
+    if (addon_count == 1) chosen_addon = addons[0];
+    else if (addon_count > 1)
+    {
+        int pick = choose("Choose a custom WAD.", addons, addon_count, "Base game only");
+        if (pick == -2) goto done;
+        if (pick >= 0) chosen_addon = addons[pick];
+    }
+    if (chosen_addon)
+    {
+        doom_wad_info game_info, addon_info;
+        DOOM_ProbeWad(chosen_game, &game_info);
+        DOOM_ProbeWad(chosen_addon, &addon_info);
+        if ((addon_info.numbered_maps && !game_info.numbered_maps) ||
+            (addon_info.episode_maps && !game_info.episode_maps))
+        {
+            notice(addon_info.numbered_maps
+                ? "This map uses DOOM II levels. Put your DOOM II WAD (or Freedoom Phase 2) into the wads folder."
+                : "This map uses DOOM episodes. Put your DOOM WAD (or Freedoom Phase 1) into the wads folder.");
+            goto done;
+        }
+        if (!game_info.numbered_maps && !game_info.full_game)
+        {
+            notice("The shareware base game cannot load custom WADs. Use the full game or Freedoom instead.");
+            goto done;
+        }
+        *addon = SDL_strdup(chosen_addon);
+    }
+    *game = SDL_strdup(chosen_game);
+    result = 1;
+done:
+    for (int i = 0; i < base_count; ++i) SDL_free(bases[i]);
+    for (int i = 0; i < addon_count; ++i) SDL_free(addons[i]);
+    return result;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     if (!SDL_Init(SDL_INIT_VIDEO))
@@ -61,6 +190,9 @@ int main(int argc, char **argv)
         if (!DOOM_ChooseWads(bundled, &selected_wad, &selected_addon))
         { SDL_Quit(); return 0; }
     }
+#else
+    if (!has_iwad && choose_from_folder(base ? base : "./", bundled, &selected_wad, &selected_addon) < 0)
+    { SDL_Quit(); return 0; }
 #endif
     if (!has_iwad && !selected_wad)
     {
