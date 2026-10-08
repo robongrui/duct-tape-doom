@@ -57,6 +57,9 @@ typedef double max_align_t;
 #define MINLONG INT32_MIN
 
 #ifdef __cplusplus
+/* The engine headers are also included by the C++ renderer. */
+#define _Noreturn [[noreturn]]
+#define _Alignas(type) alignas(type)
 static_assert(CHAR_BIT == 8 && sizeof(int) == 4 && sizeof(short) == 2,
               "DOOM requires eight-bit bytes, 32-bit int and 16-bit short");
 #else
