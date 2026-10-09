@@ -58,7 +58,7 @@ part. A few examples of how they work:
   colored light and shadows, lamps and lava glow with bloom, decorations cast
   light sized to their artwork, and an optional flashlight.
 - **Atmosphere:** height fog over pits and liquids, sprite shadows,
-  xBR pixel-art upscaling for sprites, surface detail and gloss.
+  optional xBR pixel-art upscaling for sprites, surface detail and gloss.
 - **Compatibility:** vanilla and limit-removing maps, including DEHACKED
   patches. Boom, MBF21 and GZDoom maps are not supported.
 - Headless demo runner and regression tests that need no game data.

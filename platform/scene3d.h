@@ -56,17 +56,17 @@ struct Settings {
     // Walls and floors: 0 crisp pixels, 1 smooth (bilinear), 2 sharp bilinear
     // (flat texels, edges blended over sharpSoftness texels plus a pixel).
     int filter=0;
-    float sharpSoftness=0.25f;
-    int paletteMips=1; // Palette-snapped mip levels for distant walls and floors when smooth or sharp.
+    float sharpSoftness=0;
+    int paletteMips=0; // Palette-snapped mip levels for distant walls and floors when smooth or sharp.
     float fov=90;
     float flashlightTintGain=1;
     int emissive=1, fog=1, palette=0;
     int detail=1; // Derived normal maps and palette gloss.
-    int variedHighlights=0; // Gloss highlights tighten on smooth artwork and spread on busy artwork, per palette ramp.
+    int variedHighlights=1; // Gloss highlights tighten on smooth artwork and spread on busy artwork, per palette ramp.
     int softLight=1; // Light seam blending and edge contact shading.
     int reflections=1; // Mirrored scene on water, nukage, slime and blood.
-    int retroReflections=0; // Quarter resolution, palette colors, stepped wobble.
-    int spriteFilter=2; // 0: crisp, 1: bilinear, 2: xBR pixel-art reconstruction.
+    int retroReflections=1; // Quarter resolution, palette colors, stepped wobble.
+    int spriteFilter=0; // 0: crisp, 1: bilinear, 2: xBR pixel-art reconstruction.
     int sun=1; // Sun shadows baked at level load from the sky texture.
     int bakedLights=1; // Static lights baked at level load; nearby dynamic copies add flicker and detail.
     int bounce=1; // Light bounced from sunlit and lit surfaces, baked at level load.
@@ -76,7 +76,7 @@ struct Settings {
     int bloodShine=1; // Fresh blood glints under dynamic lights, then dries matte.
     int flashlightShadows=1; // Things in the flashlight beam cast their silhouette on the wall behind.
     int softSprites=1; // Explosions and puffs stop slicing into walls; dithered toward floors.
-    int heatHaze=1; // Stepped raster shimmer above lava, hot floors and flames.
+    int heatHaze=0; // Stepped raster shimmer above lava, hot floors and flames.
     int eyeAdaptation=1; // Brief stepped over/underexposure when the light changes.
     int splashes=1; // Droplets and ripple rings where things land or walk in liquids.
     int dust=1; // Specks glinting in sunbeams and the flashlight beam.
@@ -98,13 +98,13 @@ struct Settings {
     int dampShores=1; // Walls and banks just above liquids turn darker and damp up to a ragged line.
     int sunDisc=1; // A faint sun in the sky where the baked sunlight comes from.
     int sunShafts=1; // Soft sunbeams slanting down through ceiling holes and windows, with the dust motes in them.
-    int sunScatter=0; // Sunbeams glow brighter seen toward the sun and fainter from behind it.
+    int sunScatter=1; // Sunbeams glow brighter seen toward the sun and fainter from behind it.
     int glossyScreens=1; // Monitor glass found in computer textures bulges, refracts the screen behind it and catches light.
     // Detail textures: 0 off, 1 with smooth or sharp walls and floors, 2 always
     // (stepped grain on crisp pixels). Strength scales the grain's contrast,
     // scale is detail pixels per texture pixel, fade the distance it is gone by.
     int detailTextures=0;
-    float detailStrength=0.25f,detailScale=4,detailFade=96;
+    float detailStrength=0.1f,detailScale=7,detailFade=256;
     // Performance: cheaper stand-ins for per-frame light work.
     int bakeOnlyLights=0; // Static lights only in the bake, with its light direction and flicker groups; pools as area lights.
     int gridSpriteLight=0; // Things take static light and their shadow light from a grid baked at level load.

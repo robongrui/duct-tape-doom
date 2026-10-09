@@ -103,7 +103,7 @@ takes a screenshot.
 **Textures**
 
 - **Walls and floors:** crisp pixels, smooth bilinear, or sharp bilinear, which keeps texels flat and only softens the step between them (**Edge softness** sets how far). **Palette mipmaps** keep distant smooth or sharp surfaces from shimmering.
-- **Sprites:** pixel-art upscale (xBR), crisp pixels, or soft bilinear filtering.
+- **Sprites:** crisp pixels (default), pixel-art upscale (xBR), or soft bilinear filtering.
 - **Bump detail and metal gloss:** derived from the WAD artwork, plus rounded sprite lighting with rim light on backlit enemies; affects dynamic lights only. Optional **varied highlights** make them tight on smooth artwork and broad on busy artwork.
 - **Detail textures:** a fine grain that shows only up close, off by default, with its **strength**.
 - **Emissive textures:** glowing lamp strips, computer displays, lava and nukage, with soft bloom and colored light on nearby surfaces.
@@ -147,8 +147,8 @@ other glowing decorations cast colored light sized to their artwork; flames
 flicker in DOOM's own stepped fire-flicker rhythm. With atmospheric fog on, the
 sky hazes toward the horizon.
 
-**Pixel-art upscale (xBR)** is the default for enlarged enemies, items and
-weapon sprites. It reconstructs diagonal edges on the GPU using original
+**Pixel-art upscale (xBR)**, an option beside the default crisp pixels, smooths
+enlarged enemies, items and weapon sprites. It reconstructs diagonal edges on the GPU using original
 sprite colors and transparency, adapting to their size on screen. Smaller
 sprites use alpha-aware filtering to reduce shimmer. This option is independent
 of wall/floor smoothing. It preserves the original WAD artwork and requires no
