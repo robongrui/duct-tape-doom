@@ -34,14 +34,17 @@ layout(set=2,binding=13) uniform sampler2D glassFrame;
 // Detail textures (platform/detail_texture.h): grayscale grain centred on
 // 0.5, one layer per material, with mips that fade back to 0.5.
 layout(set=2,binding=14) uniform sampler2DArray detailMaps;
+// Shorelines (buildShore in scene3d.cpp): signed distance to the nearest
+// liquid edge in r (sampled linearly), that edge's liquid sector and tint.
+layout(set=2,binding=15) uniform sampler2D shore;
 // Storage buffers follow the samplers in SPIR-V but the four uniform blocks in
 // SDL_gpu's Metal layout; METAL selects the second numbering.
 #ifdef METAL
 #define BLOCKER_BINDING 4
 #define SECTOR_BINDING 5
 #else
-#define BLOCKER_BINDING 15
-#define SECTOR_BINDING 16
+#define BLOCKER_BINDING 16
+#define SECTOR_BINDING 17
 #endif
 layout(std430,set=2,binding=BLOCKER_BINDING) readonly buffer Blockers { LightBlocker blockers[]; };
 layout(std430,set=2,binding=SECTOR_BINDING) readonly buffer Sectors { vec4 sectorInfo[]; };
@@ -59,6 +62,7 @@ layout(location=0) out vec4 outColor;
 
 // Surface detail: a Sobel filter over texel luminance tilts the face normal,
 // so dynamic lights rake across mortar and panel seams. Kept deliberately low.
+// busy: the slope's length, how much the artwork changes around the texel.
 float texelLuma(ivec2 p) {
     return dot(texel(image,palette,p,true).rgb,vec3(0.299,0.587,0.114));
 }
@@ -92,12 +96,13 @@ vec3 tiltNormal(vec3 normal,vec2 slope,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2) {
     vec3 tangent,bitangent;textureFrame(normal,dp1,dp2,duv1,duv2,tangent,bitangent);
     return normalize(normal-(slope.x*tangent+slope.y*bitangent));
 }
-vec3 detailNormal(vec2 uv,vec3 normal,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2) {
+vec3 detailNormal(vec2 uv,vec3 normal,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2,out float busy) {
     ivec2 p=ivec2(floor(uv));
     float tl=texelLuma(p+ivec2(-1,-1)),t=texelLuma(p+ivec2(0,-1)),tr=texelLuma(p+ivec2(1,-1));
     float l=texelLuma(p+ivec2(-1,0)),r=texelLuma(p+ivec2(1,0));
     float bl=texelLuma(p+ivec2(-1,1)),b=texelLuma(p+ivec2(0,1)),br=texelLuma(p+ivec2(1,1));
     vec2 slope=vec2(tr+2.0*r+br-tl-2.0*l-bl,bl+2.0*b+br-tl-2.0*t-tr)*0.25;
+    busy=length(slope);
     return tiltNormal(normal,slope*0.9,dp1,dp2,duv1,duv2);
 }
 // Crude materials from the palette's ramps: greys and blues read as metal,
@@ -109,6 +114,16 @@ float paletteGloss(uint index) {
     if(index>=112u&&index<128u) return 0.18;  // Greens.
     if(index>=160u&&index<168u) return 0.12;  // Pale yellows.
     return 0.03;
+}
+// Highlight sharpness per ramp, for varied highlights: slime and blue panels
+// polished, grey metal a little worn, everything else broad.
+float paletteShininess(uint index) {
+    if(index>=112u&&index<128u) return 40.0;  // Greens.
+    if(index>=192u&&index<208u) return 36.0;  // Blues.
+    if(index>=240u&&index<248u) return 36.0;  // Dark blues.
+    if(index>=80u&&index<112u) return 28.0;   // Greys.
+    if(index>=160u&&index<168u) return 16.0;  // Pale yellows.
+    return 12.0;
 }
 // Wall and flat texture reads (c.effects.x: 0 crisp, 1 bilinear, 2 sharp
 // bilinear). pixel: texels per screen pixel along u and v. Sharp blends each
@@ -306,21 +321,69 @@ float flowLight(vec3 world,vec3 normal,uint sector,float light) {
     if(s.x!=sector||s.w==0xFFFFu) return light;
     return light+round(max(0.0,sectorInfo[s.w].x-light)*texelFetch(contact,cell,0).a*0.8*16.0)/16.0;
 }
-// Walls: liquids sit in pits, so the light plays on their sides. Two
-// copies of the pattern drift across each other in whole texels at the tic
-// rate, one texel per unit like the flats; only their crossings flare, over
-// black. Walls sample one cell toward their visible side and fade with
-// height above their floor. Ceilings (flag 16) take the pattern in map
-// space and fade as their sector gets taller.
-// The ripples are light thrown up by the water, so they follow the light on
-// the liquid's sector, not the wall's: nothing below mid levels, full in
-// bright rooms. Nukage, slime and lava glow by themselves and keep a weak
-// ripple. The flashlight (light 0, a cone) adds its own: a flat surface
-// mirrors the wall point below the water, and where the beam toward that
-// mirror image meets the water over a liquid cell, the reflection lands here.
-// The water loses little of the beam and focuses it, so crossings can outshine
-// the beam itself.
-vec3 caustics(vec3 world,vec3 normal,uint sector) {
+// Caustic pattern rows per animation frame (see buildCaustics): 0 the plain
+// liquid flat, 1-4 caustics computed at 8, 24, 48 and 96 units above the
+// water, 5-6 the wave slope. Flags: 256 computed layers, 512 shapes grow
+// with distance, 2048 slope sway. Growing shapes give each layer its own
+// fixed size (2, 2.5, 3 and 4 units per texel; the plain flat 2) and blend
+// layers; scaling by the distance itself would shear the pattern, since
+// distance varies across a wall far from the map origin.
+float causticRow(int layer,int frame,int frames,ivec2 t) {
+    return texelFetch(causticPattern,t+ivec2(0,(layer*frames+frame)*64),0).r;
+}
+float causticLayer(vec2 coord,int layer,float scale,float sway,uint flags) {
+    int frames=max(1,textureSize(causticPattern,0).y/(64*7)),frame=int(c.texFilter.z)%frames,next=(frame+1)%frames;
+    float blend=c.texFilter.w;
+    vec2 q=coord/((flags&512u)!=0u?scale:1.0);
+    // The mirror doubles each wave's tilt, so light lands farther off the
+    // higher it travels: the pattern sways by the slope, more with distance.
+    if((flags&2048u)!=0u) {
+        ivec2 t=wrapTexel(ivec2(floor(q)),ivec2(64));
+        vec2 slope=mix(vec2(causticRow(5,frame,frames,t),causticRow(6,frame,frames,t)),
+            vec2(causticRow(5,next,frames,t),causticRow(6,next,frames,t)),blend);
+        q+=(slope*255.0-128.0)/127.0*sway;
+    }
+    ivec2 t=wrapTexel(ivec2(floor(q)),ivec2(64));
+    return mix(causticRow(layer,frame,frames,t),causticRow(layer,next,frames,t),blend);
+}
+float causticPatternAt(vec2 coord,float distance,uint flags) {
+    float sway=saturate(distance/96.0)*6.0;
+    if((flags&256u)==0u) return causticLayer(coord,0,2.0,sway,flags);
+    float h=clamp(distance,8.0,96.0);
+    float l=h<24.0?(h-8.0)/16.0:h<48.0?1.0+(h-24.0)/24.0:2.0+(h-48.0)/48.0;
+    int l0=min(int(l),2);float lf=l-float(l0);
+    const float scales[4]=float[4](2.0,2.5,3.0,4.0);
+    return mix(causticLayer(coord,1+l0,scales[l0],sway,flags),causticLayer(coord,2+l0,scales[l0+1],sway,flags),lf);
+}
+float causticSteps(float v) {return round(saturate(v*2.0-0.15)*4.0)/4.0;}
+// Walls: liquids sit in pits, so the light the water reflects plays on their
+// sides. The pattern follows the liquid flat's own animation, on the frame
+// its floor shows and crossfading the same way (texFilter.zw); only its
+// bright lines light up, over black. With computed layers it is the light
+// the flat's waves would actually gather, picked by how far the light has
+// traveled from the water: soft near it, sharp lines around 40 units, broader
+// above. Walls sample one cell toward their visible side and fade with
+// height above their floor. Ceilings (flag 16) take the pattern in map space,
+// so they mirror the floor below, and fade as their sector gets taller.
+// The ripples follow the light on the liquid's sector, not the wall's:
+// nothing below mid levels, full in bright rooms. Nukage, slime and lava glow
+// by themselves and keep a weak ripple. Dynamic lights reaching this point
+// (the flashlight; with flag 8192 also muzzle flashes and shots; static
+// lights only for the share the bake lacks) add their own: a flat surface mirrors the point below the
+// water, and where the ray toward that mirror image meets the water over a
+// liquid cell, the reflection lands here. It fades over its whole path, down
+// to the water and back up, faster than the direct light since the waves
+// spread it (the flashlight's long cone; short lights fade over their radius
+// anyway). Flag 1024: water reflects more the flatter the light strikes
+// (Schlick's Fresnel), so aiming across a pool lights the walls and aiming
+// down barely does. The layer follows each light's distance from the water,
+// weighted by brightness. Light that passes through the liquid takes its
+// tint; what the surface reflects keeps the light's own color, so the
+// brightest lines also catch a little of it.
+// Sprites take the same light on their billboard (they face the eye), fading
+// with height above the water rather than above a sector floor.
+vec3 caustics(vec3 world,vec3 normal,uint sector,bool sprite) {
+    uint flags=uint(c.flashlightTint.w);
     bool ceiling=normal.z<-0.5;
     vec2 at=ceiling?world.xy:world.xy+normal.xy/c.map.z;
     ivec2 mapSize=textureSize(causticMap,0);
@@ -331,24 +394,90 @@ vec3 caustics(vec3 world,vec3 normal,uint sector) {
     if(cell.a==0u) return vec3(0);
     vec4 water=sectorInfo[cell.r|((cell.g&127u)<<8)];
     vec3 tint=vec3(float(cell.b>>5)/7.0,float((cell.b>>2)&7u)/7.0,float(cell.b&3u)/3.0);
-    vec3 drive=vec3(max(smoothstep(0.5,0.9,water.x),(cell.g&128u)!=0u?0.3:0.0));
-    if(flashCount>0u&&lights[0].direction.w>0.0&&world.z>water.y&&lights[0].position.z>water.y) {
-        vec3 from=lights[0].position.xyz,mirrored=vec3(world.xy,2.0*water.y-world.z);
+    float drive=max(smoothstep(0.5,0.9,water.x),(cell.g&128u)!=0u?0.3:0.0),leg=0.0;
+    vec3 flash=vec3(0);float weight=0.0;
+    uvec2 mask=world.z>water.y?vLightMask:uvec2(0);
+    vec3 mirrored=vec3(world.xy,2.0*water.y-world.z);
+    while(any(notEqual(mask,uvec2(0)))) {
+        uint word=mask.x!=0u?0u:1u;
+        uint i=word*32u+uint(findLSB(mask[word]));
+        mask[word]&=mask[word]-1u;
+        vec3 from=lights[i].position.xyz;
+        if(from.z<=water.y||lights[i].baked>=1.0||(lights[i].direction.w<=0.0&&(flags&8192u)==0u)) continue;
         vec3 surface=mix(from,mirrored,(from.z-water.y)/(from.z-mirrored.z));
         ivec2 below=clamp(ivec2(floor((surface.xy-c.map.xy)*c.map.z)),ivec2(0),mapSize-1);
-        if(texelFetch(causticMap,below,0).a>0.95&&dot(normal,surface-world)>0.0)
-            drive+=lights[0].color.rgb*flashAt(surface,0u)*1.5;
+        if(texelFetch(causticMap,below,0).a<=0.95||dot(normal,surface-world)<=0.0) continue;
+        // The flashlight's long cone fades faster than its direct light; short
+        // point lights (flashes, shots) already die off over their radius
+        // and only last a moment, so they reflect strongly.
+        float spread=lights[i].direction.w>0.0?pow(max(0.0,1.0-length(mirrored-from)/lights[i].position.w),2.0)*1.5:2.5;
+        float amount=flashAtOpen(mirrored,i)*spread*(1.0-lights[i].baked);
+        if(amount<=0.0||flashAt(surface,i)<=0.0) continue;
+        if((flags&1024u)!=0u) {
+            float cosine=(from.z-water.y)/max(length(surface-from),0.001);
+            amount*=min((0.02+0.98*pow(1.0-cosine,5.0))/0.14,2.5);
+        }
+        flash+=lights[i].color.rgb*amount;
+        leg+=length(world-surface)*amount;weight+=amount;
     }
-    if(max(drive.r,max(drive.g,drive.b))<0.004) return vec3(0);
+    leg=weight>0.0?leg/weight:0.0;
+    bool flashing=max(flash.r,max(flash.g,flash.b))>=0.004;
+    if(drive<0.004&&!flashing) return vec3(0);
     vec4 info=sectorInfo[sector];
-    float fade=ceiling?1.0-smoothstep(32.0,224.0,info.z-info.y):1.0-smoothstep(0.0,96.0,world.z-info.y);
-    ivec2 p=ceiling?ivec2(floor(world.xy)):ivec2(floor(vec2(dot(world.xy,vec2(-normal.y,normal.x)),-world.z)));
-    ivec2 size=textureSize(causticPattern,0);
-    float tic=floor(c.fog.w*35.0);
-    float a=texelFetch(causticPattern,wrapTexel(p+ivec2(floor(tic*vec2(0.115,0.07))),size),0).r;
-    float b=texelFetch(causticPattern,wrapTexel(ivec2(p.y,-p.x)+ivec2(floor(tic*vec2(-0.085,0.1))),size),0).r;
-    float ripple=round(saturate(a*b*2.5)*4.0)/4.0;
-    return tint*ripple*proximity*fade*0.45*min(drive,vec3(3.0));
+    float fade=ceiling?1.0-smoothstep(32.0,224.0,info.z-info.y):1.0-smoothstep(0.0,96.0,world.z-(sprite?water.y:info.y));
+    vec2 coord=ceiling?world.xy:vec2(dot(world.xy,vec2(-normal.y,normal.x)),water.y-world.z);
+    float room=drive>=0.004?causticSteps(causticPatternAt(coord,max(world.z-water.y,0.0),flags)):0.0;
+    float lit=flashing?causticSteps(causticPatternAt(coord,leg,flags)):0.0;
+    vec3 glint=lit>=1.0?min(flash,vec3(3.0))*0.35:vec3(0);
+    return (tint*(room*min(drive,3.0)+lit*min(flash,vec3(3.0)))+glint)*proximity*fade*0.45;
+}
+// Shorelines (flag 16384). Liquids wet what they touch: walls and banks
+// above the waterline turn darker up to a ragged line, read at texel
+// centers so the damp edge steps in whole Doom pixels.
+const float shoreRange=16.0;
+float shoreDistance(vec2 xy) {
+    return textureLod(shore,(xy-c.map.xy)*c.map.z/vec2(textureSize(shore,0)),0.0).r*2.0*shoreRange-shoreRange;
+}
+// The nearest edge's liquid sector and tint; false where none is in range.
+bool shoreLiquid(vec2 xy,out uint liquid,out vec3 tint) {
+    ivec2 size=textureSize(shore,0);
+    uvec4 v=uvec4(round(texelFetch(shore,clamp(ivec2(floor((xy-c.map.xy)*c.map.z)),ivec2(0),size-1),0)*255.0));
+    liquid=v.g|((v.b&127u)<<8);
+    tint=vec3(float(v.a>>5)/7.0,float((v.a>>2)&7u)/7.0,float(v.a&3u)/3.0);
+    return (v.b&128u)!=0u;
+}
+float shoreHash(vec2 p) {
+    uvec2 q=uvec2(ivec2(floor(p)));
+    uint h=q.x*1664525u^(q.y*1013904223u+0x9e3779b9u);
+    h^=h>>16;h*=0x7feb352du;h^=h>>15;h*=0x846ca68bu;h^=h>>16;
+    return float(h)/4294967295.0;
+}
+// How wet a point is, in quarter steps: the liquid wicks up to a ragged line
+// 6-19 units above it, less the farther across a bank, wandering every few
+// texels (wander) and climbing where the artwork is darker, as mortar and
+// cracks soak up more. texel adds a per-texel jitter.
+float dampness(float height,float across,vec2 wander,vec2 texel,float luma) {
+    vec2 k=wander/6.0,i=floor(k),f=smoothstep(0.0,1.0,fract(k));
+    float drift=mix(mix(shoreHash(i),shoreHash(i+vec2(1,0)),f.x),mix(shoreHash(i+vec2(0,1)),shoreHash(i+vec2(1,1)),f.x),f.y);
+    float reach=6.0+7.0*drift+5.0*(1.0-saturate(luma*2.0))+1.5*shoreHash(texel);
+    return round(saturate((reach-height-across*1.5)/3.0)*4.0)/4.0;
+}
+// Walls read the edge just off their visible side, floors at their texel's
+// center. A floor at its liquid's height on the liquid's side of the edge is
+// the liquid itself and stays as it is.
+float shoreWet(vec3 world,vec3 normal,uint sector,float luma,out vec3 tint) {
+    tint=vec3(1);
+    bool wall=normal.z<=0.5;
+    vec2 at=wall?world.xy+normal.xy*0.25:floor(world.xy)+0.5;
+    uint liquid;
+    if(!shoreLiquid(at,liquid,tint)) return 0.0;
+    float d=shoreDistance(at),water=sectorInfo[liquid].y;
+    if(!wall&&d>0.0&&abs(sectorInfo[sector].y-water)<0.5) return 0.0;
+    float height=(wall?world.z:sectorInfo[sector].y)-water;
+    if(height<-0.5) return 0.0;
+    float along=floor(dot(world.xy,vec2(-normal.y,normal.x)));
+    vec2 wander=wall?vec2(along,0):floor(world.xy),texel=wall?vec2(along,floor(world.z)):floor(world.xy);
+    return dampness(max(height,0.0),abs(d),wander,texel,luma);
 }
 void main() {
     bool sprite=(vMode&2u)!=0u;
@@ -501,12 +630,22 @@ void main() {
             bool detail=(uint(c.flashlightTint.w)&1u)!=0u&&(any(notEqual(mask,uvec2(0)))||staticDetail);
             // Glass is smooth: its bulge replaces the artwork's bump detail,
             // and it takes a tighter, stronger highlight than painted metal.
-            vec3 bumped=glassy?screenNormal:detail?detailNormal(vUV,normal,dp1,dp2,duv1,duv2):normal;
+            float busy=0.0;
+            vec3 bumped=glassy?screenNormal:detail?detailNormal(vUV,normal,dp1,dp2,duv1,duv2,busy):normal;
             float gloss=0.0,shininess=glassy?64.0:24.0;
             if(glassy) gloss=0.9;
             else if(detail) {
                 ivec2 p=wrapTexel(ivec2(floor(vUV)),textureSize(image,0));
-                gloss=paletteGloss(uint(round(texelFetch(image,p,0).r*255.0)));
+                uint index=uint(round(texelFetch(image,p,0).r*255.0));
+                gloss=paletteGloss(index);
+                // Flag 32768, varied highlights: each ramp's sharpness is
+                // halved where the artwork is busy and doubled where it runs
+                // smooth, per texel. The highlight keeps its energy, so broad
+                // ones dim and tight ones brighten against the dark around them.
+                if((bakeFlags&32768u)!=0u) {
+                    shininess=paletteShininess(index)*exp2(1.0-2.0*smoothstep(0.03,0.15,busy));
+                    gloss*=(shininess+2.0)/26.0;
+                }
             }
             vec3 view=normalize(c.eye.xyz-vWorld);
             // Wet blood glints only under dynamic lights, in a brighter palette
@@ -593,9 +732,22 @@ void main() {
         if(blend>0.0) emission=mix(emission,maskAt(nextImage,at,c.effects.x>0.0),blend);
         illumination=max(illumination,vec3(emission));
     }
+    // Flag 16384: damp walls and banks above liquids (shoreWet), darker and
+    // a little stained by the liquid; glowing texels stay dry.
+    if(mapped&&(bakeFlags&16384u)!=0u&&normal.z>-0.5) {
+        vec3 stain;
+        float damp=shoreWet(vWorld,normal,sector,dot(color.rgb,vec3(0.299,0.587,0.114)),stain)*(1.0-emission);
+        if(damp>0.0) color.rgb*=mix(vec3(1),vec3(0.55)*mix(vec3(1),stain,0.25),damp);
+    }
     // Glowing texels stay clean of the detail grain.
+    vec3 albedo=color.rgb;
     color.rgb=color.rgb*mix(grain,1.0,emission)*illumination+specular;
-    if(mapped&&(bakeFlags&4u)!=0u&&(abs(normal.z)<=0.5||(normal.z<-0.5&&(bakeFlags&16u)!=0u))) color.rgb+=caustics(vWorld,normal,sector);
+    if(mapped&&(bakeFlags&4u)!=0u&&(abs(normal.z)<=0.5||(normal.z<-0.5&&(bakeFlags&16u)!=0u))) color.rgb+=caustics(vWorld,normal,sector,false);
+    // Flag 4096: things in the world (not the weapon, mode 1, or effect sprites, 1024)
+    // near liquids catch the caustics too, in their own colors so the painted
+    // shading survives; the scale matches the walls' additive light.
+    if(sprite&&(bakeFlags&4100u)==4100u&&(vMode&1025u)==0u&&c.effects.z==0.0)
+        color.rgb+=albedo*(1.0-emission)*caustics(vWorld,normal,0u,true)*2.5;
     if((vMode&32u)!=0u&&c.water.z>0.0&&c.effects.z==0.0) {
         // The mirrored camera maps the surface to the same screen point; a
         // scrolling wobble distorts it, and grazing views reflect more.

@@ -196,7 +196,7 @@ SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vertex,SDL_GPUShader *fragment,
 bool createPipelines() {
     worldVertexShader=VERTEX_SHADER(world_vert,1);reflectVertexShader=VERTEX_SHADER(reflect_vert,2);
     screenVertexShader=VERTEX_SHADER(screen_vert,0);skyVertexShader=VERTEX_SHADER(sky_vert,0);
-    SDL_GPUShader *world=FRAGMENT_SHADER(world_frag,15,2,4),*opaque=FRAGMENT_SHADER(opaque_frag,15,2,4);
+    SDL_GPUShader *world=FRAGMENT_SHADER(world_frag,16,2,4),*opaque=FRAGMENT_SHADER(opaque_frag,16,2,4);
     SDL_GPUShader *sky=FRAGMENT_SHADER(sky_frag,2,0,3),*skySurface=FRAGMENT_SHADER(sky_surface_frag,2,0,3),*shadow=FRAGMENT_SHADER(shadow_frag,1,0,0),*decal=FRAGMENT_SHADER(decal_frag,1,0,0);
     SDL_GPUShader *particle=FRAGMENT_SHADER(particle_frag,0,0,0),*solid=FRAGMENT_SHADER(solid_frag,0,0,0),*hud=FRAGMENT_SHADER(hud_frag,1,0,0);
     SDL_GPUShader *heat=FRAGMENT_SHADER(heat_frag,0,0,0);
@@ -351,7 +351,7 @@ void setView(SDL_GPURenderPass *pass,float x,float y,float w,float h,const SDL_R
 // World fragment resources: image, palette, next frame, seams, contact,
 // reflection, palette lookup, wall bake, flat light, caustic map and pattern,
 // wall and flat light directions, the surface's screen glass frame, detail
-// texture layers; blockers and sector data;
+// texture layers, the shore map; blockers and sector data;
 // four uniform blocks.
 // Bindings reset with every render pass, so each pass binds them again.
 void bindWorld(SDL_GPURenderPass *pass,SDL_GPUTexture *reflection) {
@@ -362,9 +362,9 @@ void bindWorld(SDL_GPURenderPass *pass,SDL_GPUTexture *reflection) {
         {flatLightTexture?gpu(flatLightTexture):dummyBake,nearestClamp},
         {causticTexture?gpu(causticTexture):dummyContact,linearClamp},{causticPattern?gpu(causticPattern):dummyContact,nearestClamp},
         {wallDirectionTexture?gpu(wallDirectionTexture):dummyBake,nearestClamp},{flatDirectionTexture?gpu(flatDirectionTexture):dummyBake,nearestClamp},
-        {dummyBake,nearestClamp},{detailTexture,detailSampler}};
+        {dummyBake,nearestClamp},{detailTexture,detailSampler},{shoreTexture?gpu(shoreTexture):dummyContact,linearClamp}};
     SDL_BindGPUFragmentSamplers(pass,1,&samplers[0],1);
-    SDL_BindGPUFragmentSamplers(pass,3,&samplers[1],12);
+    SDL_BindGPUFragmentSamplers(pass,3,&samplers[1],13);
     SDL_GPUBuffer *storage[]={blockerArena.buffer,sectorArena.buffer};
     SDL_BindGPUFragmentStorageBuffers(pass,0,storage,2);
 }
@@ -529,6 +529,37 @@ GpuTextureRef gpuCreateTexture(GpuFormat format,int w,int h,const void *pixels,i
     SDL_EndGPUCopyPass(copy);
     SDL_ReleaseGPUTransferBuffer(device,transfer);
     return GpuTextureRef(new GpuTexture{texture});
+}
+void gpuUpdateTexture(const GpuTextureRef &texture,GpuFormat format,const std::vector<std::array<int,4>> &rects,const void *pixels,int bytesPerRow) {
+    if(!texture||rects.empty())return;
+    int pixelBytes=format==GpuFormat::R8?1:format==GpuFormat::RG8?2:format==GpuFormat::RGBA8?4:8;
+    Uint32 bytes=0;
+    for(const auto &r:rects)bytes+=(Uint32)(r[2]*r[3]*pixelBytes);
+    if(!bytes)return;
+    SDL_GPUTransferBufferCreateInfo info={SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,bytes,0};
+    SDL_GPUTransferBuffer *transfer=SDL_CreateGPUTransferBuffer(device,&info);
+    if(!transfer) {fprintf(stderr,"GPU upload failed: %s\n",SDL_GetError());return;}
+    byte *mapped=(byte*)SDL_MapGPUTransferBuffer(device,transfer,false);
+    Uint32 offset=0;
+    for(const auto &r:rects)for(int row=0;row<r[3];++row) {
+        memcpy(mapped+offset,(const byte*)pixels+(size_t)(r[1]+row)*bytesPerRow+(size_t)r[0]*pixelBytes,(size_t)r[2]*pixelBytes);
+        offset+=(Uint32)(r[2]*pixelBytes);
+    }
+    SDL_UnmapGPUTransferBuffer(device,transfer);
+    if(!uploadCommand)uploadCommand=SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(uploadCommand);
+    offset=0;
+    for(const auto &r:rects) {
+        if(r[2]<=0||r[3]<=0)continue;
+        SDL_GPUTextureTransferInfo source={transfer,offset,(Uint32)r[2],(Uint32)r[3]};
+        SDL_GPUTextureRegion target={};
+        target.texture=texture->texture;target.x=(Uint32)r[0];target.y=(Uint32)r[1];target.w=(Uint32)r[2];target.h=(Uint32)r[3];target.d=1;
+        // No cycling: the rest of the texture must keep its contents.
+        SDL_UploadToGPUTexture(copy,&source,&target,false);
+        offset+=(Uint32)(r[2]*r[3]*pixelBytes);
+    }
+    SDL_EndGPUCopyPass(copy);
+    SDL_ReleaseGPUTransferBuffer(device,transfer);
 }
 bool platformReadMask(const char *path,int w,int h,std::vector<float> &values) {
     SDL_Surface *loaded=SDL_LoadPNG(path);

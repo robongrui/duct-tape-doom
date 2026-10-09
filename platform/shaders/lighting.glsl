@@ -20,11 +20,15 @@ float flashAtOpen(vec3 point,uint i) {
 #ifdef BLOCKERS
 // Solid walls and closed portal spans stop the ray; matches doom_flash_at.
 // The intersection tests scale by det instead of dividing per blocker.
+// A glowing panel (direction.x without a cone) is a vertical span of that
+// half-height: the heights s on it whose rays pass every opening narrow to
+// [low,high], so a lip hiding part of the panel lets part of its light by.
 float flashAt(vec3 point,uint i) {
     float amount=flashAtOpen(point,i);
     if(amount<=0.0) return 0.0;
     vec3 origin3=lights[i].position.xyz;
     vec3 delta=point-origin3;
+    float extent=lights[i].direction.w>0.0?0.0:lights[i].direction.x,low=-extent,high=extent;
     for(uint j=lights[i].first;j<lights[i].first+lights[i].count;++j) {
         vec4 line=blockers[j].line;
         vec2 edge=line.zw-line.xy,origin=line.xy-origin3.xy;
@@ -33,12 +37,16 @@ float flashAt(vec3 point,uint i) {
         float t=cross2(origin,edge),u=cross2(origin,delta.xy);
         if(det<0.0) {det=-det;t=-t;u=-u;}
         if(t>0.001*det&&t<0.999*det&&u>=0.0&&u<=det) {
-            float hit=origin3.z+delta.z*(t/det);
-            vec2 opening=blockers[j].opening.xy;
-            if(hit<=opening.x+0.02||hit>=opening.y-0.02) return 0.0;
+            // The ray from height s on the span crosses at hit+s*lever.
+            float along=t/det,hit=origin3.z+delta.z*along,lever=1.0-along;
+            vec2 opening=blockers[j].opening.xy+vec2(0.02,-0.02);
+            if(opening.x>=opening.y) return 0.0;
+            float below=(opening.x-hit)/lever,above=(opening.y-hit)/lever;
+            if(below>=high||above<=low) return 0.0;
+            low=max(low,below);high=min(high,above);
         }
     }
-    return amount;
+    return extent>0.0?amount*(high-low)/(2.0*extent):amount;
 }
 #endif
 // Lambert facing, blended toward 1 by the light's directionality (color.w):

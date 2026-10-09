@@ -14,6 +14,7 @@ struct SurfaceLight {
     float x,y,z,radius,strength;
     std::array<float,3> color;
     int facing=0; // Merge group: 0 floor, 1 ceiling, 2+ wall normal octant.
+    float extent=0; // Wall panels: half-height of the glowing span around z.
 };
 // Emissive tiles repeat every 64 units, so one pool or panel run yields
 // dozens of overlapping same-colored lights. Fold each 256-unit cell of a
@@ -21,7 +22,7 @@ struct SurfaceLight {
 // merged identities stay stable as the view moves.
 inline std::vector<SurfaceLight> mergeSurfaceLights(const std::vector<SurfaceLight> &sources,float cell=256) {
     struct Sum {float x=0,y=0,z=0,weight=0,strength=0,radius=0;std::array<float,3> color={};
-                std::array<float,3> low={1e9f,1e9f,1e9f},high={-1e9f,-1e9f,-1e9f};int count=0;};
+                std::array<float,3> low={1e9f,1e9f,1e9f},high={-1e9f,-1e9f,-1e9f};float bottom=1e9f,top=-1e9f;int count=0;};
     std::map<SurfaceLightKey,Sum> cells;
     for(const auto &light:sources) {
         int hue=0;
@@ -37,6 +38,7 @@ inline std::vector<SurfaceLight> mergeSurfaceLights(const std::vector<SurfaceLig
         }
         sum.strength=std::max(sum.strength,light.strength);
         sum.radius=std::max(sum.radius,light.radius);
+        sum.bottom=std::min(sum.bottom,light.z-light.extent);sum.top=std::max(sum.top,light.z+light.extent);
         ++sum.count;
     }
     std::vector<SurfaceLight> merged;merged.reserve(cells.size());
@@ -44,9 +46,11 @@ inline std::vector<SurfaceLight> mergeSurfaceLights(const std::vector<SurfaceLig
         const Sum &sum=entry.second;
         // Widen with the members' extent so the cell's edges stay lit.
         float spread=std::hypot(sum.high[0]-sum.low[0],sum.high[1]-sum.low[1],sum.high[2]-sum.low[2])*0.5f;
-        merged.push_back({entry.first,sum.x/sum.weight,sum.y/sum.weight,sum.z/sum.weight,sum.radius+spread*0.5f,
+        float z=sum.z/sum.weight;
+        merged.push_back({entry.first,sum.x/sum.weight,sum.y/sum.weight,z,sum.radius+spread*0.5f,
                           sum.strength*std::clamp(std::sqrt((float)sum.count)*0.5f,1.0f,1.5f),
-                          {sum.color[0]/sum.weight,sum.color[1]/sum.weight,sum.color[2]/sum.weight},entry.first[4]});
+                          {sum.color[0]/sum.weight,sum.color[1]/sum.weight,sum.color[2]/sum.weight},entry.first[4],
+                          entry.first[4]>=2?std::max(sum.top-z,z-sum.bottom):0.0f});
     }
     return merged;
 }

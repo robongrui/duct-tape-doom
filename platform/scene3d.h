@@ -22,6 +22,9 @@ enum class GpuFormat { R8, RG8, RGBA8, RGBA16Uint };
 // Backend hooks used while the scene builds its resources.
 // levels>1: pixels holds that many mip levels packed tightly one after another.
 GpuTextureRef gpuCreateTexture(GpuFormat format,int width,int height,const void *pixels,int bytesPerRow,int levels=1);
+// Replaces rects (x, y, width, height) of a texture with the same rects of
+// pixels, an image of the texture's size; the rest keeps its contents.
+void gpuUpdateTexture(const GpuTextureRef &texture,GpuFormat format,const std::vector<std::array<int,4>> &rects,const void *pixels,int bytesPerRow);
 // Reads an emissive mask image as value*alpha in [0,1]; false if unreadable or the wrong size.
 bool platformReadMask(const char *path,int width,int height,std::vector<float> &values);
 
@@ -59,6 +62,7 @@ struct Settings {
     float flashlightTintGain=1;
     int emissive=1, fog=1, palette=0;
     int detail=1; // Derived normal maps and palette gloss.
+    int variedHighlights=0; // Gloss highlights tighten on smooth artwork and spread on busy artwork, per palette ramp.
     int softLight=1; // Light seam blending and edge contact shading.
     int reflections=1; // Mirrored scene on water, nukage, slime and blood.
     int retroReflections=0; // Quarter resolution, palette colors, stepped wobble.
@@ -78,14 +82,23 @@ struct Settings {
     int dust=1; // Specks glinting in sunbeams and the flashlight beam.
     int playerShadow=1; // The player's own sprite shadow from the sun or a strong light.
     int doorLight=1; // Light from a bright room spills through a door as it opens.
+    int movingRelight=1; // Baked lamp light and sun re-bake around doors, lifts and lowering walls as they move.
     int texelLight=1; // Baked light, sun and bounce blend per texture pixel instead of hard map cells.
     int skyLight=1; // Cool fill from the visible sky, baked at level load; dark under overhangs.
     int bakedAO=1; // Corners, ledges and alcoves darken, baked at level load.
     int thingShadows=1; // Decorations (columns, trees, hanging bodies) cast baked shadows.
     int lightFlow=1; // Brighter sectors light their neighbors through openings, flicker included.
     int ceilingCaustics=1; // Liquid caustics also ripple on the ceilings above.
+    int causticsComputed=1; // Caustics are the light the liquid flat's waves gather, sharpening with distance from the water.
+    int causticsGrow=1; // Caustic shapes grow from 2 to 4 units per texel with distance from the water.
+    int causticsAngle=1; // Flashlight caustics follow how much the water reflects at the beam's angle.
+    int causticsSway=1; // Caustics sway with the wave slope, more the farther the light travels.
+    int causticsSprites=1; // Monsters and things near liquids catch the caustics too.
+    int causticsShots=0; // Muzzle flashes and projectiles over liquids throw caustics, not just the flashlight.
+    int dampShores=1; // Walls and banks just above liquids turn darker and damp up to a ragged line.
     int sunDisc=1; // A faint sun in the sky where the baked sunlight comes from.
     int sunShafts=1; // Soft sunbeams slanting down through ceiling holes and windows, with the dust motes in them.
+    int sunScatter=0; // Sunbeams glow brighter seen toward the sun and fainter from behind it.
     int glossyScreens=1; // Monitor glass found in computer textures bulges, refracts the screen behind it and catches light.
     // Detail textures: 0 off, 1 with smooth or sharp walls and floors, 2 always
     // (stepped grain on crisp pixels). Strength scales the grain's contrast,
@@ -95,6 +108,7 @@ struct Settings {
     // Performance: cheaper stand-ins for per-frame light work.
     int bakeOnlyLights=0; // Static lights only in the bake, with its light direction and flicker groups; pools as area lights.
     int gridSpriteLight=0; // Things take static light and their shadow light from a grid baked at level load.
+    int unoccludedSurfaceLights=0; // Glowing textures' dynamic light skips wall tests; its gloss can show through walls.
 };
 // glassFrame: on textures with monitor screens, where each glass pixel sits
 // on its screen (see screen_glass.h); null otherwise.
@@ -113,7 +127,7 @@ extern std::vector<Vertex> mistVertices,particleVertices,heatVertices;
 extern std::vector<Vertex> shaftVertices;
 // Sky ceilings and sky walls, drawn into depth with the sky shader.
 extern std::vector<Vertex> skyVertices;
-extern GpuTextureRef seamTexture,contactTexture,cloudTexture,wallBakeTexture,flatLightTexture,causticTexture,causticPattern;
+extern GpuTextureRef seamTexture,contactTexture,cloudTexture,wallBakeTexture,flatLightTexture,causticTexture,causticPattern,shoreTexture;
 // Bake-only lights: where static light comes from, per wall atlas texel and
 // floor/ceiling cell (see bakeLights).
 extern GpuTextureRef wallDirectionTexture,flatDirectionTexture;

@@ -57,6 +57,10 @@ std::vector<OptionTab> optionTabs(Settings &s) {
             {"Surface detail",{
                 check("Bump detail and metal gloss",&s.detail,
                     "Bump detail and metal gloss derived from the WAD artwork; affects dynamic lights, and static ones with bake-only lights."),
+                check("Varied highlights",&s.variedHighlights,
+                    "Gloss highlights are tight and bright where the artwork runs smooth and broad and dim where it is busy, "
+                    "with slime and blue panels sharper than worn grey metal.",
+                    [](const Settings &d){return d.detail!=0;}),
                 choice("Detail textures",&s.detailTextures,{"Off","With filtered walls","Always"},{0,1,2},
                     "A fine grain over walls and floors that shows only up close and fades out with distance, picked per texture "
                     "from its colors (stone, metal, wood, flesh). Scale and distance are in graphics.cfg (detail_scale, detail_fade)."),
@@ -87,6 +91,10 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                 check("Sector light flow",&s.lightFlow,
                     "Brighter rooms light the floors and walls beyond their openings; flickering rooms flicker faintly next door."),
                 check("Door light spill",&s.doorLight,"Light from a brighter room spills through a door as it opens."),
+                check("Moving doors re-light",&s.movingRelight,
+                    "Baked lamp light and sunlight follow doors, lifts and lowering walls: as a door rises, the light beyond it "
+                    "steps in under the edge, re-baked around it in the background.",
+                    [](const Settings &d){return d.bakedLights!=0||d.sun!=0;}),
                 check("Eye adaptation",&s.eyeAdaptation,"Brief stepped over- or underexposure when you move between bright and dark areas.")}},
             {"Flashlight and shadows",{
                 slider("Flashlight tint",&s.flashlightTintGain,0,2,0.5,"Subtle target-color tint: left is off, middle is the default, right is stronger."),
@@ -98,6 +106,9 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                 check("Sunbeams",&s.sunShafts,
                     "Soft shafts of sunlight slant down through ceiling holes and windows, where the dust motes glint. Needs sun shadows.",
                     [](const Settings &d){return d.sun!=0;}),
+                check("Sunbeam scattering",&s.sunScatter,
+                    "Sunbeams glow brighter when you look toward the sun through them and fainter from behind, as dust scatters light onward.",
+                    [](const Settings &d){return d.sun!=0&&d.sunShafts!=0;}),
                 check("Sun in the sky",&s.sunDisc,"A faint sun disc and soft glow where the baked sunlight comes from, over the sky texture's brightest part."),
                 check("Dust motes",&s.dust,"Specks that glint in indoor sunbeams and the flashlight beam."),
                 check("Heat haze",&s.heatHaze,"Rows of pixels shimmer above lava, hot damaging floors and flames.")}},
@@ -117,6 +128,28 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                     "Rippling light from water, nukage, slime, blood and lava on the walls around them; pattern taken from the level's liquid flat."),
                 check("Caustics on ceilings",&s.ceilingCaustics,"The ripples also play on the ceiling above water, nukage, slime and lava.",
                     [](const Settings &d){return d.caustics!=0;}),
+                check("Computed caustics",&s.causticsComputed,
+                    "The light the liquid's waves actually gather, worked out from its flat at level load: soft near the water, "
+                    "sharp lines about 40 units up, broader above. Off shows the flat's own bright streaks.",
+                    [](const Settings &d){return d.caustics!=0;}),
+                check("Caustics grow with distance",&s.causticsGrow,
+                    "The shapes widen from 2 to 4 units per pixel the farther the light travels from the water; off keeps one unit per pixel like the floor.",
+                    [](const Settings &d){return d.caustics!=0;}),
+                check("Flashlight reflection angle",&s.causticsAngle,
+                    "Water reflects more of the beam the flatter it strikes: aiming across a pool lights the walls, aiming straight down barely does.",
+                    [](const Settings &d){return d.caustics!=0;}),
+                check("Caustic sway",&s.causticsSway,
+                    "The pattern sways with the wave slope, more the higher up the wall, like light dancing under a bridge.",
+                    [](const Settings &d){return d.caustics!=0;}),
+                check("Caustics on monsters and things",&s.causticsSprites,
+                    "Monsters, items and decorations near water, nukage, slime and lava catch the ripples too, in their own colors.",
+                    [](const Settings &d){return d.caustics!=0;}),
+                check("Caustics from shots",&s.causticsShots,
+                    "Muzzle flashes and projectiles over liquids throw brief ripples on the walls around them, like the flashlight. Subtle next to their direct light.",
+                    [](const Settings &d){return d.caustics!=0;}),
+                check("Damp shores",&s.dampShores,
+                    "Walls and banks just above water, nukage, slime and blood turn darker and damp up to a ragged line, "
+                    "a little stained by the liquid. Lava stays dry."),
                 check("Splashes",&s.splashes,"Droplets and ripple rings where things land, explode or wade in liquids; rings disturb reflections.")}}}},
         {"Performance",{
             {"Cheaper light work",{
@@ -127,6 +160,10 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                 check("Grid lighting for monsters",&s.gridSpriteLight,
                     "Monsters and items take static light, and the light their shadow falls from, from a grid baked at level load "
                     "instead of tracing rays every frame.",
-                    [](const Settings &d){return d.bakedLights!=0;})}}}}};
+                    [](const Settings &d){return d.bakedLights!=0;}),
+                check("Unblocked glowing-texture light",&s.unoccludedSurfaceLights,
+                    "Light from lamp strips and glowing flats skips the wall tests per pixel. Cheaper near light panels, "
+                    "but their highlights can show on shiny surfaces through walls.",
+                    [](const Settings &d){return d.emissive!=0&&d.bakeOnlyLights==0;})}}}}};
 }
 }

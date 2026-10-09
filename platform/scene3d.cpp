@@ -51,7 +51,7 @@ std::vector<LightBlocker> lightBlockers;
 std::unordered_map<int,Image> images;
 std::map<int,std::vector<Vertex>> batches,shadowBatches,decalBatches;
 std::vector<Vertex> mistVertices,particleVertices,heatVertices,skyVertices,shaftVertices;
-GpuTextureRef seamTexture,contactTexture,cloudTexture,wallBakeTexture,flatLightTexture,causticTexture,causticPattern;
+GpuTextureRef seamTexture,contactTexture,cloudTexture,wallBakeTexture,flatLightTexture,causticTexture,causticPattern,shoreTexture;
 GpuTextureRef wallDirectionTexture,flatDirectionTexture;
 float reflectionPlane=0;
 bool reflectionActive=false;
@@ -183,6 +183,10 @@ uint64_t surfaceLightTime;
 struct FlatLightSample { Point point; int u,v; };
 std::map<std::pair<int,int>,std::vector<FlatLightSample>> flatLightSamples;
 } // namespace
+// Waits for the background re-bake around moving sectors (relightMovingSectors)
+// and, with apply, uploads what it baked. Every full bake calls it first.
+void finishRelight(bool apply=true);
+extern std::vector<int> relightPending;
 
 std::vector<unsigned> paletteLUTColors(const unsigned *palette) {
     std::vector<unsigned> colors(32*32*32);
@@ -582,11 +586,24 @@ void buildSurfaceMaps(float minx,float miny,float maxx,float maxy) {
 // so the shader can follow the light on the water as it changes. It spreads through open cells whose
 // floors sit near the liquid surface, so ledges and closed doors stop it;
 // void cells take their strongest neighbor for the walls on their boundary. The pattern
-// is the high-passed luminance of the level's most common liquid flat, so the
-// ripples come from the WAD's own artwork.
-constexpr float causticRange=96;
+// is every animation frame of the level's most common liquid flat, stacked,
+// keeping how far each texel (softened over its 3x3 neighbors, so lone bright
+// texels drop out) rises above the flat's mean brightness, so the ripples are
+// the WAD's own wave streaks and animate in step with the floor.
+// Each frame has causticLayers rows of 64x64: 0 that plain pattern; 1-4 real
+// caustics at causticHeights above the water, from reading the softened
+// brightness as wave height and bouncing overhead light off it (8x8 rays per
+// texel, splatted where they land; denser landing is brighter); 5-6 the wave
+// slope in x and y around 128. The wave strength comes from the flat's own
+// curvature (its 70th percentile) so the lines sharpen causticFocus units up;
+// stored is how far the landing light exceeds the even spread, full at 4x.
+constexpr float causticRange=96,causticFocus=40;
+constexpr int causticLayers=7;
+constexpr float causticHeights[4]={8,24,48,96};
+std::vector<int> causticFrames;int causticSpeed=0;
 void buildCaustics() {
-    causticTexture=nullptr;causticPattern=nullptr;
+    causticTexture=nullptr;causticPattern=nullptr;causticFrames.clear();causticSpeed=0;
+    uint64_t start=SDL_GetTicksNS();
     size_t count=(size_t)mapWidth*mapHeight;
     std::vector<float> distance(count,causticRange),height(count,0);
     std::vector<int> source(count,-1);
@@ -637,29 +654,151 @@ void buildCaustics() {
     }
     std::map<int,int> flatUse;
     for(int i=0;i<numsectors;++i)if(sectorMist[i].liquid)++flatUse[sectors[i].floorpic];
-    int lump=firstflat+std::max_element(flatUse.begin(),flatUse.end(),[](const auto &a,const auto &b){return a.second<b.second;})->first;
-    std::array<byte,64*64> pattern={};
-    if(W_LumpLength(lump)>=4096) {
-        const byte *pixels=(const byte*)W_CacheLumpNum(lump,PU_CACHE);
-        const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
-        std::array<float,64*64> luma,ridge;float peak=0.001f;
-        for(int i=0;i<4096;++i) {const byte *c=palette+pixels[i]*3;luma[i]=0.299f*c[0]+0.587f*c[1]+0.114f*c[2];}
-        // Crests: texels brighter than their 5x5 surroundings, wrapped to tile.
-        for(int y=0;y<64;++y)for(int x=0;x<64;++x) {
-            float blur=0;
-            for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)blur+=luma[((y+dy)&63)*64+((x+dx)&63)];
-            ridge[y*64+x]=std::max(0.0f,luma[y*64+x]-blur/25);peak=std::max(peak,ridge[y*64+x]);
+    int pic=std::max_element(flatUse.begin(),flatUse.end(),[](const auto &a,const auto &b){return a.second<b.second;})->first,lump=firstflat+pic;
+    causticFrames={pic};int next=pic;causticSpeed=P_PicAnimationNext(false,pic,&next);
+    while(causticSpeed>0&&next!=pic&&causticFrames.size()<32) {causticFrames.push_back(next);P_PicAnimationNext(false,next,&next);}
+    size_t frames=causticFrames.size();
+    std::vector<byte> pattern;
+    std::vector<float> luma(4096*frames,0);float mean=0,peak=0;
+    const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
+    for(size_t f=0;f<frames;++f) {
+        int frameLump=firstflat+causticFrames[f];
+        if(W_LumpLength(frameLump)<4096)continue;
+        const byte *pixels=(const byte*)W_CacheLumpNum(frameLump,PU_CACHE);
+        for(int i=0;i<4096;++i) {
+            const byte *c=palette+pixels[i]*3;
+            luma[f*4096+i]=0.299f*c[0]+0.587f*c[1]+0.114f*c[2];
         }
-        for(int i=0;i<4096;++i)pattern[i]=(byte)std::lround(std::sqrt(ridge[i]/peak)*255);
+        std::array<float,4096> soft;
+        for(int y=0;y<64;++y)for(int x=0;x<64;++x) {
+            float sum=0;
+            for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx)sum+=luma[f*4096+((y+dy)&63)*64+((x+dx)&63)]*(dx||dy?1.0f:2.0f);
+            soft[y*64+x]=sum/10;mean+=sum/10;peak=std::max(peak,sum/10);
+        }
+        std::copy(soft.begin(),soft.end(),luma.begin()+f*4096);
+    }
+    mean/=4096.0f*frames;
+    std::vector<float> wave(luma.size()),slope(luma.size()*2),curvature;
+    for(size_t i=0;i<luma.size();++i)wave[i]=(luma[i]-mean)/std::max(peak-mean,0.001f);
+    float steepest=0.001f;
+    for(size_t f=0;f<frames;++f) {
+        auto h=[&](int x,int y){return wave[f*4096+(y&63)*64+(x&63)];};
+        for(int y=0;y<64;++y)for(int x=0;x<64;++x) {
+            size_t i=f*4096+y*64+x;
+            slope[2*i]=(h(x+1,y)-h(x-1,y))/2;slope[2*i+1]=(h(x,y+1)-h(x,y-1))/2;
+            steepest=std::max({steepest,std::abs(slope[2*i]),std::abs(slope[2*i+1])});
+            float xx=h(x+1,y)-2*h(x,y)+h(x-1,y),yy=h(x,y+1)-2*h(x,y)+h(x,y-1);
+            float xy=(h(x+1,y+1)-h(x-1,y+1)-h(x+1,y-1)+h(x-1,y-1))/4;
+            curvature.push_back(std::abs((xx+yy)/2)+std::sqrt((xx-yy)*(xx-yy)/4+xy*xy));
+        }
+    }
+    std::nth_element(curvature.begin(),curvature.begin()+curvature.size()*70/100,curvature.end());
+    float bend=1/(causticFocus*std::max(curvature[curvature.size()*70/100],0.001f));
+    pattern.assign(4096*frames*causticLayers,0);
+    auto row=[&](int layer,size_t f){return pattern.data()+(layer*frames+f)*4096;};
+    for(size_t f=0;f<frames;++f) {
+        byte *plain=row(0,f);
+        for(int i=0;i<4096;++i) {
+            plain[i]=(byte)std::lround(std::clamp(wave[f*4096+i],0.0f,1.0f)*255);
+            for(int axis=0;axis<2;++axis)
+                row(5+axis,f)[i]=(byte)std::lround(128+127*std::clamp(slope[2*(f*4096+i)+axis]/steepest,-1.0f,1.0f));
+        }
+        // Bilinear slope between texel centers, so landing spots move smoothly.
+        auto slopeAt=[&](float x,float y,int axis) {
+            x-=0.5f;y-=0.5f;int x0=(int)std::floor(x),y0=(int)std::floor(y);float fx=x-x0,fy=y-y0;
+            auto at=[&](int xx,int yy){return slope[2*(f*4096+(yy&63)*64+(xx&63))+axis];};
+            return (at(x0,y0)*(1-fx)+at(x0+1,y0)*fx)*(1-fy)+(at(x0,y0+1)*(1-fx)+at(x0+1,y0+1)*fx)*fy;
+        };
+        for(int layer=0;layer<4;++layer) {
+            float reach=bend*causticHeights[layer];
+            std::array<float,4096> density={};
+            for(int y=0;y<64;++y)for(int x=0;x<64;++x)for(int sy=0;sy<8;++sy)for(int sx=0;sx<8;++sx) {
+                float px=x+(sx+0.5f)/8,py=y+(sy+0.5f)/8;
+                float qx=px+reach*slopeAt(px,py,0)-0.5f,qy=py+reach*slopeAt(px,py,1)-0.5f;
+                int x0=(int)std::floor(qx),y0=(int)std::floor(qy);float fx=qx-x0,fy=qy-y0;
+                density[(y0&63)*64+(x0&63)]+=(1-fx)*(1-fy)/64;density[(y0&63)*64+((x0+1)&63)]+=fx*(1-fy)/64;
+                density[((y0+1)&63)*64+(x0&63)]+=(1-fx)*fy/64;density[((y0+1)&63)*64+((x0+1)&63)]+=fx*fy/64;
+            }
+            byte *out=row(1+layer,f);
+            for(int i=0;i<4096;++i)out[i]=(byte)std::lround(std::clamp((density[i]-1)/3,0.0f,1.0f)*255);
+        }
     }
     causticTexture=gpuCreateTexture(GpuFormat::RGBA8,mapWidth,mapHeight,dilated.data(),mapWidth*4);
-    causticPattern=gpuCreateTexture(GpuFormat::R8,64,64,pattern.data(),64);
+    causticPattern=gpuCreateTexture(GpuFormat::R8,64,64*(int)(frames*causticLayers),pattern.data(),64);
     if(!causticTexture||!causticPattern)I_Error((char*)"Could not allocate caustic maps");
-    fprintf(stderr,"3D caustics: %zu liquid cells; pattern from %.8s.\n",liquidCells,lumpinfo[lump].name);
+    fprintf(stderr,"3D caustics: %zu liquid cells; pattern from %.8s, %zu frames, computed in %.0f ms.\n",liquidCells,lumpinfo[lump].name,frames,(SDL_GetTicksNS()-start)/1e6);
+}
+// Shorelines: where a liquid meets a wall, a closed door, a higher floor or
+// dry ground at its own height (not another liquid, not a drop). Map cells
+// hold the signed distance to the nearest such edge, positive on the
+// liquid's side, as (d+shoreRange)/(2*shoreRange) in r; the shader samples it
+// linearly, which is exact along straight edges, so damp banks keep their
+// width however coarse the cells are. g and b's low 7 bits hold that edge's
+// liquid sector, b's top bit marks cells with an edge in range, a its tint in
+// 3-3-2 bits like causticMap. Lava and other hot liquids leave no damp.
+constexpr float shoreRange=16;
+void buildShore() {
+    shoreTexture=nullptr;
+    size_t count=(size_t)mapWidth*mapHeight;
+    std::vector<float> best(count,1e9f);
+    std::vector<int> liquidOf(count,-1);
+    size_t edges=0;
+    float reach=shoreRange+2*mapCell;
+    for(int i=0;i<numlines;++i) {
+        const line_t &line=lines[i];
+        float ax=units(line.v1->x),ay=units(line.v1->y),bx=units(line.v2->x),by=units(line.v2->y);
+        float ex=bx-ax,ey=by-ay,length2=ex*ex+ey*ey;if(length2<0.01f)continue;
+        for(int side=0;side<2;++side) {
+            const sector_t *wet=side?line.backsector:line.frontsector,*dry=side?line.frontsector:line.backsector;
+            if(!wet||wet==dry)continue;
+            int s=(int)(wet-sectors);const auto &mist=sectorMist[s];
+            if(!mist.liquid||mist.hot||wet->floorpic==skyflatnum||s>=32768)continue;
+            float water=units(wet->floorheight);
+            if(dry) {
+                float floor=units(dry->floorheight),ceiling=units(dry->ceilingheight);
+                bool closed=ceiling-floor<8||ceiling<=water+8;
+                bool flush=std::abs(floor-water)<=0.5f;
+                if(!closed&&(floor<water-0.5f||(flush&&sectorMist[dry-sectors].liquid)))continue;
+            }
+            ++edges;
+            // Doom's front side is on the line's right: negative cross product.
+            float wetSign=side?1.0f:-1.0f;
+            int x0=std::max(0,(int)std::floor((std::min(ax,bx)-reach-mapOrigin[0])/mapCell));
+            int x1=std::min(mapWidth-1,(int)std::floor((std::max(ax,bx)+reach-mapOrigin[0])/mapCell));
+            int y0=std::max(0,(int)std::floor((std::min(ay,by)-reach-mapOrigin[1])/mapCell));
+            int y1=std::min(mapHeight-1,(int)std::floor((std::max(ay,by)+reach-mapOrigin[1])/mapCell));
+            for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x) {
+                float px=mapOrigin[0]+(x+0.5f)*mapCell,py=mapOrigin[1]+(y+0.5f)*mapCell;
+                float t=std::clamp(((px-ax)*ex+(py-ay)*ey)/length2,0.0f,1.0f);
+                float d=std::hypot(px-ax-ex*t,py-ay-ey*t);
+                size_t index=(size_t)y*mapWidth+x;
+                if(d>=reach||d>=std::abs(best[index]))continue;
+                float cross=ex*(py-ay)-ey*(px-ax);
+                best[index]=cross*wetSign>=0?d:-d;liquidOf[index]=s;
+            }
+        }
+    }
+    if(!edges)return;
+    std::vector<uint8_t> cells(count*4,0);
+    for(size_t i=0;i<count;++i) {
+        cells[4*i]=255;
+        int s=liquidOf[i];if(s<0)continue;
+        const auto &color=sectorMist[s].color;
+        float peak=std::max({color[0],color[1],color[2],0.01f});
+        auto level=[&](int c,int steps){return (int)std::lround(std::clamp(color[c]/peak,0.0f,1.0f)*steps);};
+        cells[4*i]=(uint8_t)std::lround(std::clamp((best[i]+shoreRange)/(2*shoreRange),0.0f,1.0f)*255);
+        cells[4*i+1]=(uint8_t)(s&255);
+        cells[4*i+2]=(uint8_t)((s>>8)|128);
+        cells[4*i+3]=(uint8_t)(level(0,7)<<5|level(1,7)<<2|level(2,3));
+    }
+    shoreTexture=gpuCreateTexture(GpuFormat::RGBA8,mapWidth,mapHeight,cells.data(),mapWidth*4);
+    if(!shoreTexture)I_Error((char*)"Could not allocate the shore map");
+    fprintf(stderr,"3D shorelines: %zu liquid edges.\n",edges);
 }
 void layoutBake();
 void findDoors();
 void buildMap() {
+    finishRelight(false);
     batches.clear();shadowBatches.clear();
     surfaceSelection.clear();flatLightSamples.clear();surfaceLightTime=0;
     floors.assign(numsubsectors,{});
@@ -681,11 +820,12 @@ void buildMap() {
     classifySectorMist();
     buildSurfaceMaps(minx,miny,maxx,maxy);
     buildCaustics();
+    buildShore();
     sunBaked=false;lightBakeKey=-1;bounceKey=-1;ambientKey=-1;flowKey=-1;bakeThingsKey=-1;wallBakeTexture=nullptr;flatLightTexture=nullptr;
     skyOpeningOf.clear();skyOpenings.clear();sunShafts.clear();
     bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();
     wallDirectionCells.clear();flatDirectionCells.clear();wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;
-    layoutBake();
+    layoutBake();relightPending.clear();
     findDoors();
     oldThings.clear(); oldHeights.clear(); tickTime=0;
     levelSerial=r_levelserial;
@@ -707,6 +847,8 @@ float lighting(const sector_t *sector,bool bright=false) {
 }
 // Shared by the sun and light bakes, built once per level: the sector/line
 // map the rays walk, and a texel for every wall at the floor cell size.
+// Sector heights start as the level's; relightMovingSectors keeps them
+// following doors and lifts.
 void layoutBake() {
     bakeMap={};bakeMap.sectors.resize(numsectors);
     for(int i=0;i<numsectors;++i)
@@ -782,12 +924,13 @@ void layoutBake() {
         }
     }
 }
-// Runs work(n) for n in [0,count) on all cores; work must touch only its own texels.
-void parallelFor(int count,const std::function<void(int)> &work) {
+// Runs work(n) for n in [0,count) on all cores (at most threads); work must
+// touch only its own texels.
+void parallelFor(int count,const std::function<void(int)> &work,unsigned threads=16) {
     std::atomic<int> next{0};
     auto run=[&] {for(int n;(n=next++)<count;)work(n);};
     std::vector<std::thread> workers;
-    for(unsigned n=1;n<std::clamp(std::thread::hardware_concurrency(),1u,16u);++n)workers.emplace_back(run);
+    for(unsigned n=1;n<std::clamp(std::thread::hardware_concurrency(),1u,std::max(1u,threads));++n)workers.emplace_back(run);
     run();
     for(auto &worker:workers)worker.join();
 }
@@ -812,11 +955,29 @@ void uploadFlatLight() {
 // Sun shadows, baked once per level into the contact map's blue channel and
 // the wall atlas alpha. The sky texture's brightest columns face the sun
 // (sky.frag maps column x to yaw -x*2pi/(4*width)) and also give its tint;
-// the elevation is fixed. Rays start in the level's initial state.
+// the elevation is fixed. Rays see the sector heights in bakeMap.
 float enclosure(const sector_t *sector,float *light=nullptr);
 float hashUnit(int x,int y,uint32_t seed);
 void bakeShafts();
+// A floor cell's sun visibility (0-255), or -1 for void and sky floors.
+int sunCell(const BakeMap &map,size_t i,const float direction[3]) {
+    int sector=seamCells[i].own;
+    if(sector==noSector||sectors[sector].floorpic==skyflatnum)return -1;
+    float px=mapOrigin[0]+(i%mapWidth+0.5f)*mapCell,py=mapOrigin[1]+(i/mapWidth+0.5f)*mapCell;
+    return (int)std::lround(sunVisibility(map,sector,px,py,map.sectors[sector].floor+1,direction)*255);
+}
+// A wall strip's sun visibility into the atlas alpha. Walls fade with the
+// angle to the sun so grazing walls fall into shade.
+void sunStrip(const BakeMap &map,const BakeStrip &strip,const float direction[3]) {
+    float length=std::hypot(direction[0],direction[1]),sunX=direction[0]/length,sunY=direction[1]/length;
+    float facing=std::clamp((strip.dy*sunX-strip.dx*sunY)*1.5f,0.0f,1.0f);
+    forStripTexels(strip,[&](size_t i,float x,float y,float z) {
+        float visible=facing>0?facing*sunVisibility(map,strip.sector,x,y,z,direction):0;
+        wallBakeCells[4*i+3]=(uint8_t)std::lround(visible*255);
+    });
+}
 void bakeSun() {
+    finishRelight();
     sunBaked=true;sunLevel=0;
     if(contactCells.empty())return;
     std::vector<float> skyLights;
@@ -859,23 +1020,14 @@ void bakeSun() {
     std::atomic<size_t> lit{0};
     parallelFor(mapHeight,[&](int y) {
         for(int x=0;x<mapWidth;++x) {
-            size_t i=(size_t)y*mapWidth+x;int sector=seamCells[i].own;
-            if(sector==noSector||sectors[sector].floorpic==skyflatnum)continue;
-            float px=mapOrigin[0]+(x+0.5f)*mapCell,py=mapOrigin[1]+(y+0.5f)*mapCell;
-            float visible=sunVisibility(bakeMap,sector,px,py,bakeMap.sectors[sector].floor+1,direction);
-            contactCells[4*i+2]=(uint8_t)std::lround(visible*255);
+            size_t i=(size_t)y*mapWidth+x;
+            int visible=sunCell(bakeMap,i,direction);
+            if(visible<0)continue;
+            contactCells[4*i+2]=(uint8_t)visible;
             if(visible>0)++lit;
         }
     });
-    // Walls fade with the angle to the sun so grazing walls fall into shade.
-    parallelFor((int)bakeOrder.size(),[&](int n) {
-        const BakeStrip &strip=bakeStrips[bakeOrder[n]];
-        float facing=std::clamp((strip.dy*sunX-strip.dx*sunY)*1.5f,0.0f,1.0f);
-        forStripTexels(strip,[&](size_t i,float x,float y,float z) {
-            float visible=facing>0?facing*sunVisibility(bakeMap,strip.sector,x,y,z,direction):0;
-            wallBakeCells[4*i+3]=(uint8_t)std::lround(visible*255);
-        });
-    });
+    parallelFor((int)bakeOrder.size(),[&](int n) {sunStrip(bakeMap,bakeStrips[bakeOrder[n]],direction);});
     contactTexture=gpuCreateTexture(GpuFormat::RGBA8,mapWidth,mapHeight,contactCells.data(),mapWidth*4);
     if(!contactTexture)I_Error((char*)"Could not allocate surface maps");
     uploadWallBake();
@@ -1051,7 +1203,8 @@ void muzzleFlash(mobj_t *source,int weapon,int projectile) {
 // Unoccluded lights skip wall blockers, so shading them costs no ray tests.
 // baked: the part of this light already in the bake maps, which world surfaces
 // subtract so they only gain its flicker and detail (0 for dynamic-only lights).
-// spot: a spotlight's unit axis and cone cosine (direction).
+// spot: a spotlight's unit axis and cone cosine (direction); without a cone,
+// x is a glowing panel's half-height, which softens its wall shadows.
 void appendLight(float x,float y,float z,float radius,float strength,const std::array<float,3> &color,const mobj_t *source,float directionality,bool occluded=true,float baked=0,
                  const std::array<float,4> &spot={}) {
     if(flashes.count>=maxLights) return;
@@ -1141,7 +1294,7 @@ const std::vector<int> &bakeGridLights(float x,float y) {
 // A light that casts things' floor shadows (addEnemyShadow).
 struct ShadowLight { float x,y,z,strength; };
 float luminance(const float color[3]) {return 0.299f*color[0]+0.587f*color[1]+0.114f*color[2];}
-StaticSample traceStatic(float x,float y,float z,int sector) {
+StaticSample traceStatic(float x,float y,float z,int sector,const BakeMap &map=bakeMap) {
     StaticSample sample;
     if(bakeGrid.empty())return sample;
     float groups[flickerGroups]={};
@@ -1149,8 +1302,8 @@ StaticSample traceStatic(float x,float y,float z,int sector) {
     for(int n:bakeGridLights(x,y)) {
         float towards[3];
         const float *color=n<points?bakeSources[n].color:bakeAreas[n-points].color;
-        float amount=n<points?addBakedLight(bakeMap,bakeSources[n],sector,x,y,z,nullptr,sample.color.data(),towards)
-                             :addBakedArea(bakeMap,bakeAreas[n-points],sector,x,y,z,nullptr,sample.color.data(),towards);
+        float amount=n<points?addBakedLight(map,bakeSources[n],sector,x,y,z,nullptr,sample.color.data(),towards)
+                             :addBakedArea(map,bakeAreas[n-points],sector,x,y,z,nullptr,sample.color.data(),towards);
         if(amount<=0)continue;
         float weight=amount*luminance(color);
         for(int c=0;c<3;++c)sample.towards[c]+=towards[c]*weight;
@@ -1171,7 +1324,24 @@ StaticSample traceStatic(float x,float y,float z,int sector) {
 bool gridLightActive() {
     return settings.gridSpriteLight&&bakedLightsActive&&staticSerial==lightBakeSerial&&!staticGrid.empty();
 }
+StaticCell staticCellAt(const BakeMap &map,int gx,int gy) {
+    StaticCell cell;
+    float x=mapOrigin[0]+(gx+0.5f)*staticCell,y=mapOrigin[1]+(gy+0.5f)*staticCell;
+    int cx=std::clamp((int)std::floor((x-mapOrigin[0])/mapCell),0,mapWidth-1);
+    int cy=std::clamp((int)std::floor((y-mapOrigin[1])/mapCell),0,mapHeight-1);
+    int sector=seamCells[(size_t)cy*mapWidth+cx].own;
+    if(sector==noSector)return cell;
+    const BakeSector &s=map.sectors[sector];
+    if(s.ceiling-s.floor<16)return cell;
+    cell.used=true;
+    cell.low=s.floor+std::min(32.0f,(s.ceiling-s.floor)*0.5f);
+    cell.at[0]=traceStatic(x,y,cell.low,sector,map);
+    cell.high=cell.low;cell.at[1]=cell.at[0];
+    if(s.ceiling-s.floor>112) {cell.high=s.floor+96;cell.at[1]=traceStatic(x,y,cell.high,sector,map);}
+    return cell;
+}
 void bakeStaticGrid() {
+    finishRelight();
     staticSerial=lightBakeSerial;staticGrid.clear();
     if(bakeGrid.empty()||seamCells.empty())return;
     uint64_t start=SDL_GetTicksNS();
@@ -1180,19 +1350,9 @@ void bakeStaticGrid() {
     std::atomic<size_t> used{0};
     parallelFor(staticHeight,[&](int gy) {
         for(int gx=0;gx<staticWidth;++gx) {
-            float x=mapOrigin[0]+(gx+0.5f)*staticCell,y=mapOrigin[1]+(gy+0.5f)*staticCell;
-            int cx=std::clamp((int)std::floor((x-mapOrigin[0])/mapCell),0,mapWidth-1);
-            int cy=std::clamp((int)std::floor((y-mapOrigin[1])/mapCell),0,mapHeight-1);
-            int sector=seamCells[(size_t)cy*mapWidth+cx].own;
-            if(sector==noSector)continue;
-            const BakeSector &s=bakeMap.sectors[sector];
-            if(s.ceiling-s.floor<16)continue;
             StaticCell &cell=staticGrid[(size_t)gy*staticWidth+gx];
-            cell.used=true;++used;
-            cell.low=s.floor+std::min(32.0f,(s.ceiling-s.floor)*0.5f);
-            cell.at[0]=traceStatic(x,y,cell.low,sector);
-            cell.high=cell.low;cell.at[1]=cell.at[0];
-            if(s.ceiling-s.floor>112) {cell.high=s.floor+96;cell.at[1]=traceStatic(x,y,cell.high,sector);}
+            cell=staticCellAt(bakeMap,gx,gy);
+            if(cell.used)++used;
         }
     });
     fprintf(stderr,"3D light grid: %zu cells of %dx%d, baked in %.0f ms.\n",used.load(),staticWidth,staticHeight,(SDL_GetTicksNS()-start)/1e6);
@@ -1367,9 +1527,9 @@ unsigned sectorMode(const sector_t *sector) {return unsigned(sector-sectors+1)<<
 void quad(std::vector<Vertex> &out,Vertex a,Vertex b,Vertex c,Vertex d) {
     out.insert(out.end(),{a,b,c,a,c,d});
 }
-void surfaceLight(const SurfaceLightKey &key,float x,float y,float z,const Image &image,int facing,float radius=224) {
+void surfaceLight(const SurfaceLightKey &key,float x,float y,float z,const Image &image,int facing,float radius=224,float extent=0) {
     if(!settings.emissive || image.emissionWeight==0) return;
-    surfaceLights.push_back({key,x,y,z,radius,1.65f*image.emissionWeight,image.emissionColor,facing});
+    surfaceLights.push_back({key,x,y,z,radius,1.65f*image.emissionWeight,image.emissionColor,facing,extent});
 }
 const std::vector<FlatLightSample> &flatSamples(int sectorIndex,int lump,const Image &image) {
     auto key=std::make_pair(sectorIndex,lump);
@@ -1439,11 +1599,13 @@ void collectSurfaceLights() {
     }
     if(!settings.emissive) {surfaceSelection.clear();return;}
     surfaceSelection.update(mergeSurfaceLights(surfaceLights),surfaceEye,seconds);
-    // Surface lights sit on their own wall or floor and reach a short way;
-    // per-pixel wall occlusion multiplied their cost for little visible gain.
+    // Surface lights reach a short way, but walls still stop them: the bake
+    // subtracts only their flat share, so their gloss would otherwise show on
+    // shiny surfaces through walls. The Performance switch skips the tests.
     for(const auto &slot:surfaceSelection.slots) {
         const auto &p=slot.light;
-        appendLight(p.x,p.y,p.z,p.radius,p.strength*slot.gain,p.color,nullptr,0.35f,false,bakedLightsActive?1.0f:0);
+        appendLight(p.x,p.y,p.z,p.radius,p.strength*slot.gain,p.color,nullptr,0.35f,!settings.unoccludedSurfaceLights,bakedLightsActive?1.0f:0,
+                    {std::min(p.extent,p.radius),0,0,0});
     }
 }
 void wallLights(const line_t &line,int side,Point a,Point b,float bottom,float top,int tex,float anchor,int span) {
@@ -1457,12 +1619,16 @@ void wallLights(const line_t &line,int side,Point a,Point b,float bottom,float t
     int lastU=(int)std::floor((u+len-image.emissionU)/image.width);
     int firstV=(int)std::ceil((anchor-top-image.emissionV)/image.height);
     int lastV=(int)std::floor((anchor-bottom-image.emissionV)/image.height);
+    int stepV=std::max(1,64/image.height);
     for(int tileU=firstU;tileU<=lastU;tileU+=std::max(1,64/image.width)) {
         float along=image.emissionU+tileU*image.width-u,t=along/len;
-        for(int tileV=firstV;tileV<=lastV;tileV+=std::max(1,64/image.height))
+        for(int tileV=firstV;tileV<=lastV;tileV+=stepV) {
+            // Each sample stands for the rows of tiles it skips, within the wall piece.
+            float z=anchor-image.emissionV-tileV*image.height;
+            float extent=std::max(0.0f,std::min({image.height*stepV*0.5f,top-z,z-bottom}));
             surfaceLight({1,(int)(&line-lines),side,tileU,tileV,span},
-                a.x+(b.x-a.x)*t+nx*4,a.y+(b.y-a.y)*t+ny*4,
-                anchor-image.emissionV-tileV*image.height,image,facing);
+                a.x+(b.x-a.x)*t+nx*4,a.y+(b.y-a.y)*t+ny*4,z,image,facing,224,extent);
+        }
     }
 }
 void addWall(const line_t &line,int side,Point a,Point b,float bottom,float top,int tex,float anchor,float light,bool facing,int span) {
@@ -1528,6 +1694,17 @@ void addEnemyShadow(const mobj_t &thing,const Image &image,int lump,bool flip,
             for(Point p:{polygon[0],polygon[n],polygon[n+1]}) out.push_back(vertex(p));
     }
 }
+// Dust scatters sunlight mostly onward: a Henyey-Greenstein lobe (g 0.35,
+// averaging 1 over all directions) brightens beams seen toward the sun, about
+// 1.7x, and dims them from behind, about 0.55x. x, y, z: eye to the point.
+float sunScatter(float x,float y,float z) {
+    if(!settings.sunScatter)return 1;
+    constexpr float g=0.35f;
+    float distance=std::sqrt(x*x+y*y+z*z);
+    if(distance<1e-3f)return 1;
+    float toward=(x*sunDirection[0]+y*sunDirection[1]+z*sunDirection[2])/distance;
+    return (1-g*g)/std::pow(1+g*g-2*g*toward,1.5f);
+}
 // Sunbeam ribbons: each baked shaft as a quad turned about its axis to face
 // the eye, drawn additively after the world without writing depth; mist.frag
 // softens its edges, ends and contact with geometry. Shafts over a floor that
@@ -1550,8 +1727,8 @@ void buildShafts(const Uniforms &camera) {
         if(alpha<0.02f)continue;
         for(float &c:side)c*=14/across;
         auto vertex=[&](float u,float v) {
-            float t=v*s.length;
-            Vertex out={s.x+d[0]*t+side[0]*u,s.y+d[1]*t+side[1]*u,s.z+d[2]*t+side[2]*u,u,v,alpha,2};
+            float t=v*s.length,x=s.x+d[0]*t+side[0]*u,y=s.y+d[1]*t+side[1]*u,z=s.z+d[2]*t+side[2]*u;
+            Vertex out={x,y,z,u,v,alpha*sunScatter(x-eye[0],y-eye[1],z-eye[2]),2};
             out.red=sunTint[0];out.green=sunTint[1];out.blue=sunTint[2];
             return out;
         };
@@ -2419,12 +2596,55 @@ void encodeDirection(const float normal[3],const float towards[3],float total,co
     if(best)out[3]=(uint8_t)(best*16+std::lround(std::clamp(groups[best]/total,0.0f,1.0f)*15));
     else out[3]=(uint8_t)std::lround(std::clamp(sheen/total,0.0f,1.0f)*15);
 }
+// The static light at a surface point, unflickered, into out (rgb at half
+// scale, in 1/32 steps) and, if given, its bake-only direction texel.
+void gatherStatic(const BakeMap &map,int sector,float x,float y,float z,const float normal[3],uint8_t *out,uint8_t *direction) {
+    int points=(int)bakeSources.size();
+    float sum[3]={},towards[3]={},total=0,groups[flickerGroups]={},sheen=0;
+    for(int n:bakeGridLights(x,y)) {
+        float to[3];bool inside=false;
+        const float *color=n<points?bakeSources[n].color:bakeAreas[n-points].color;
+        float amount=n<points?addBakedLight(map,bakeSources[n],sector,x,y,z,normal,sum,to)
+                             :addBakedArea(map,bakeAreas[n-points],sector,x,y,z,normal,sum,to,&inside);
+        if(!direction||amount<=0)continue;
+        float weight=amount*luminance(color);
+        for(int c=0;c<3;++c)towards[c]+=to[c]*weight;
+        total+=weight;
+        if(n<points)groups[sourceGroups[n]]+=weight;
+        // The pool's own surface (facing the way the pool glows).
+        else if(inside&&normal[2]*(bakeAreas[n-points].ceiling?-1:1)>0.5f)sheen+=weight;
+    }
+    for(int c=0;c<3;++c)out[c]=(uint8_t)std::min(255L,std::lround(std::round(sum[c]*32)/32*0.5f*255));
+    if(direction)encodeDirection(normal,towards,total,groups,sheen,direction);
+}
+// Static light for a floor/ceiling map cell (only: with directions).
+void lightCell(const BakeMap &map,size_t i,bool only) {
+    static const float up[3]={0,0,1},down[3]={0,0,-1};
+    int sector=seamCells[i].own;
+    if(sector==noSector)return;
+    float px=mapOrigin[0]+(i%mapWidth+0.5f)*mapCell,py=mapOrigin[1]+(i/mapWidth+0.5f)*mapCell;
+    const BakeSector &s=map.sectors[sector];
+    size_t layer=(size_t)mapWidth*mapHeight;
+    if(sectors[sector].floorpic!=skyflatnum)
+        gatherStatic(map,sector,px,py,s.floor+1,up,flatCell(floorLight,i),only?&flatDirectionCells[4*i]:nullptr);
+    if(sectors[sector].ceilingpic!=skyflatnum)
+        gatherStatic(map,sector,px,py,s.ceiling-1,down,flatCell(ceilingLight,i),only?&flatDirectionCells[4*(layer+i)]:nullptr);
+}
+// Static light for a wall strip's atlas texels.
+void lightStrip(const BakeMap &map,const BakeStrip &strip,bool only) {
+    const float normal[3]={strip.dy,-strip.dx,0};
+    forStripTexels(strip,[&](size_t i,float x,float y,float z) {
+        size_t texel=i/atlasStride*atlasWidth+i%atlasStride;
+        gatherStatic(map,strip.sector,x,y,z,normal,&wallBakeCells[4*i],only?&wallDirectionCells[4*texel]:nullptr);
+    });
+}
 // Static lights, baked into the floor/ceiling map and the wall atlas rgb:
 // fullbright decorations and (with emissive textures) merged surface lights,
-// unflickered, in the level's initial state. Values step by 1/32, like the
+// unflickered, with the sector heights in bakeMap. Values step by 1/32, like the
 // 32 light rows of COLORMAP. Bake-only lights also light liquid pools as
 // areas and record each texel's light direction and flicker group.
 void bakeLights() {
+    finishRelight();
     lightBakeKey=lightBakeInputs();++lightBakeSerial;
     bool only=lightBakeKey&2;
     if(flatLightCells.empty())return;
@@ -2462,46 +2682,8 @@ void bakeLights() {
         wallDirectionCells.assign((size_t)atlasWidth*atlasHeight*4,0);
         flatDirectionCells.assign((size_t)mapWidth*mapHeight*2*4,0);
     } else {wallDirectionCells.clear();flatDirectionCells.clear();}
-    auto gather=[&](int sector,float x,float y,float z,const float normal[3],uint8_t *out,uint8_t *direction) {
-        float sum[3]={},towards[3]={},total=0,groups[flickerGroups]={},sheen=0;
-        for(int n:bakeGridLights(x,y)) {
-            float to[3];bool inside=false;
-            const float *color=n<points?sources[n].color:bakeAreas[n-points].color;
-            float amount=n<points?addBakedLight(bakeMap,sources[n],sector,x,y,z,normal,sum,to)
-                                 :addBakedArea(bakeMap,bakeAreas[n-points],sector,x,y,z,normal,sum,to,&inside);
-            if(!direction||amount<=0)continue;
-            float weight=amount*luminance(color);
-            for(int c=0;c<3;++c)towards[c]+=to[c]*weight;
-            total+=weight;
-            if(n<points)groups[sourceGroups[n]]+=weight;
-            // The pool's own surface (facing the way the pool glows).
-            else if(inside&&normal[2]*(bakeAreas[n-points].ceiling?-1:1)>0.5f)sheen+=weight;
-        }
-        for(int c=0;c<3;++c)out[c]=(uint8_t)std::min(255L,std::lround(std::round(sum[c]*32)/32*0.5f*255));
-        if(direction)encodeDirection(normal,towards,total,groups,sheen,direction);
-    };
-    static const float up[3]={0,0,1},down[3]={0,0,-1};
-    size_t layer=(size_t)mapWidth*mapHeight;
-    parallelFor(mapHeight,[&](int y) {
-        for(int x=0;x<mapWidth;++x) {
-            size_t i=(size_t)y*mapWidth+x;int sector=seamCells[i].own;
-            if(sector==noSector)continue;
-            float px=mapOrigin[0]+(x+0.5f)*mapCell,py=mapOrigin[1]+(y+0.5f)*mapCell;
-            const BakeSector &s=bakeMap.sectors[sector];
-            if(sectors[sector].floorpic!=skyflatnum)
-                gather(sector,px,py,s.floor+1,up,flatCell(floorLight,i),only?&flatDirectionCells[4*i]:nullptr);
-            if(sectors[sector].ceilingpic!=skyflatnum)
-                gather(sector,px,py,s.ceiling-1,down,flatCell(ceilingLight,i),only?&flatDirectionCells[4*(layer+i)]:nullptr);
-        }
-    });
-    parallelFor((int)bakeOrder.size(),[&](int n) {
-        const BakeStrip &strip=bakeStrips[bakeOrder[n]];
-        const float normal[3]={strip.dy,-strip.dx,0};
-        forStripTexels(strip,[&](size_t i,float x,float y,float z) {
-            size_t texel=i/atlasStride*atlasWidth+i%atlasStride;
-            gather(strip.sector,x,y,z,normal,&wallBakeCells[4*i],only?&wallDirectionCells[4*texel]:nullptr);
-        });
-    });
+    parallelFor(mapHeight,[&](int y) {for(int x=0;x<mapWidth;++x)lightCell(bakeMap,(size_t)y*mapWidth+x,only);});
+    parallelFor((int)bakeOrder.size(),[&](int n) {lightStrip(bakeMap,bakeStrips[bakeOrder[n]],only);});
     uploadFlatLight();
     uploadWallBake();
     wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;
@@ -2524,6 +2706,7 @@ int bounceInputs() {
 // light. Samples are taken every 16 units and spread bilinearly over the
 // cells between them within a sector or wall strip; values step by 1/32.
 void bakeBounce() {
+    finishRelight();
     bounceKey=bounceInputs();
     if(flatLightCells.empty()||wallBakeCells.empty())return;
     uint64_t start=SDL_GetTicksNS();
@@ -2766,6 +2949,7 @@ void bakeSpread(int step,FlatSample flatSample,FlatWrite flatWrite,WallSample wa
 // like Doom's light levels, packed into the alpha of the bounce layers:
 // sky in the high nibble, openness in the low one.
 void bakeAmbient() {
+    finishRelight();
     ambientKey=bakeThingsKey;
     if(flatLightCells.empty()||wallBakeCells.empty())return;
     uint64_t start=SDL_GetTicksNS();
@@ -2828,6 +3012,7 @@ void bakeAmbient() {
 // light rises toward that sector's current light, so flickering rooms
 // flicker faintly beyond their openings. Doors count as they start (closed).
 void bakeFlow() {
+    finishRelight();
     flowKey=bakeThingsKey;
     if(seamCells.empty())return;
     uint64_t start=SDL_GetTicksNS();
@@ -2901,6 +3086,174 @@ float flowLightAt(float x,float y,const sector_t *sector,float light) {
     size_t i=(size_t)cy*mapWidth+cx;const SeamCell &cell=seamCells[i];
     if(cell.own!=(uint16_t)(sector-sectors)||cell.flow==noSector)return light;
     return light+std::round(std::max(0.0f,lighting(&sectors[cell.flow])-light)*contactCells[4*i+3]/255.0f*0.8f*16)/16;
+}
+// Moving sectors re-light (settings.movingRelight): bakeMap follows doors,
+// lifts and lowering walls, at their exact heights at rest and on an 8-unit
+// grid while they move, so things lit by traceStatic see through an open
+// door at once. Each change re-bakes, on a background thread, the static
+// light within reach of every baked light whose radius touches the sector,
+// and the sun on floors and walls up to the distance the sector's opening
+// can throw it. Bounce, sky light, flow and sunbeams keep the level's start.
+// One re-bake runs at a time; changes meanwhile wait for the next.
+struct Relight {
+    std::thread worker;
+    std::atomic<bool> done{false};
+    bool running=false,lights=false,only=false,grid=false,sun=false;
+    BakeMap map; // bakeMap as it was when the re-bake started.
+    float sunDirection[3]={};
+    // Per map cell, wall strip and grid cell: 1 re-light, 2 re-sun.
+    std::vector<uint8_t> cells,strips,gridCells;
+    int lightBounds[4],sunBounds[4]; // Marked cells: x0, y0, x1, y1 inclusive.
+    std::vector<int16_t> sunCells; // Floor sun over sunBounds; -1 unchanged.
+    std::vector<size_t> gridList;
+    std::vector<StaticCell> gridResults;
+} relight;
+std::vector<int> relightPending;
+// The height a sector's floor or ceiling takes in bakeMap.
+float bakeHeight(int sector,bool ceiling) {
+    float now=units(ceiling?sectors[sector].ceilingheight:sectors[sector].floorheight);
+    if((size_t)sector>=oldHeights.size()||oldHeights[sector][ceiling]==now)return now;
+    return std::round(now/8)*8;
+}
+void markRelight(float x0,float y0,float x1,float y1,uint8_t bit) {
+    int cx0=std::clamp((int)std::floor((x0-mapOrigin[0])/mapCell),0,mapWidth-1),cx1=std::clamp((int)std::floor((x1-mapOrigin[0])/mapCell),0,mapWidth-1);
+    int cy0=std::clamp((int)std::floor((y0-mapOrigin[1])/mapCell),0,mapHeight-1),cy1=std::clamp((int)std::floor((y1-mapOrigin[1])/mapCell),0,mapHeight-1);
+    for(int y=cy0;y<=cy1;++y)for(int x=cx0;x<=cx1;++x)relight.cells[(size_t)y*mapWidth+x]|=bit;
+    int *b=bit==1?relight.lightBounds:relight.sunBounds;
+    b[0]=std::min(b[0],cx0);b[1]=std::min(b[1],cy0);b[2]=std::max(b[2],cx1);b[3]=std::max(b[3],cy1);
+    for(int index:bakeOrder) {
+        const BakeStrip &strip=bakeStrips[index];
+        float bx=strip.ax+strip.dx*strip.length,by=strip.ay+strip.dy*strip.length;
+        if(std::max(strip.ax,bx)<x0||std::min(strip.ax,bx)>x1||std::max(strip.ay,by)<y0||std::min(strip.ay,by)>y1)continue;
+        relight.strips[index]|=bit;
+    }
+    if(bit==1&&relight.grid) {
+        int gx0=std::clamp((int)std::floor((x0-mapOrigin[0])/staticCell),0,staticWidth-1),gx1=std::clamp((int)std::floor((x1-mapOrigin[0])/staticCell),0,staticWidth-1);
+        int gy0=std::clamp((int)std::floor((y0-mapOrigin[1])/staticCell),0,staticHeight-1),gy1=std::clamp((int)std::floor((y1-mapOrigin[1])/staticCell),0,staticHeight-1);
+        for(int y=gy0;y<=gy1;++y)for(int x=gx0;x<=gx1;++x)relight.gridCells[(size_t)y*staticWidth+x]=1;
+    }
+}
+void startRelight() {
+    Relight &job=relight;
+    job.lights=settings.bakedLights&&lightBakeKey>=0&&lightBakeKey==lightBakeInputs()&&!bakeGrid.empty()&&wallBakeTexture&&flatLightTexture;
+    job.only=job.lights&&(lightBakeKey&2)&&wallDirectionTexture&&flatDirectionTexture;
+    job.grid=job.lights&&staticSerial==lightBakeSerial&&!staticGrid.empty();
+    job.sun=sunBaked&&sunLevel>0&&contactTexture&&wallBakeTexture;
+    std::vector<int> pending;pending.swap(relightPending);
+    if(!job.lights&&!job.sun)return;
+    job.cells.assign((size_t)mapWidth*mapHeight,0);job.strips.assign(bakeStrips.size(),0);
+    job.gridCells.assign(job.grid?staticGrid.size():0,0);
+    for(int *b:{job.lightBounds,job.sunBounds}) {b[0]=b[1]=INT_MAX;b[2]=b[3]=-1;}
+    const float elevation=40*doomPi/180;
+    for(int sector:pending) {
+        const BakeSector &s=bakeMap.sectors[sector];
+        float x0=1e9f,y0=1e9f,x1=-1e9f,y1=-1e9f,low=s.floor,high=s.ceiling;
+        for(int index:s.lines) {
+            const BakeLine &line=bakeMap.lines[index];
+            x0=std::min({x0,line.ax,line.bx});y0=std::min({y0,line.ay,line.by});
+            x1=std::max({x1,line.ax,line.bx});y1=std::max({y1,line.ay,line.by});
+            int other=line.front==sector?line.back:line.front;
+            if(other>=0) {low=std::min(low,bakeMap.sectors[other].floor);high=std::max(high,bakeMap.sectors[other].ceiling);}
+        }
+        if(x1<x0)continue;
+        if(job.lights) {
+            for(const BakeLight &light:bakeSources) {
+                float dx=std::max({x0-light.x,0.0f,light.x-x1}),dy=std::max({y0-light.y,0.0f,light.y-y1});
+                if(dx*dx+dy*dy<light.radius*light.radius)
+                    markRelight(light.x-light.radius,light.y-light.radius,light.x+light.radius,light.y+light.radius,1);
+            }
+            for(const BakeArea &area:bakeAreas) {
+                if(area.high[0]+area.radius<x0||area.low[0]-area.radius>x1||area.high[1]+area.radius<y0||area.low[1]-area.radius>y1)continue;
+                markRelight(area.low[0]-area.radius,area.low[1]-area.radius,area.high[0]+area.radius,area.high[1]+area.radius,1);
+            }
+        }
+        if(job.sun) {
+            // Sun through the sector reaches floors and walls this far away from the sun.
+            float reach=std::min((high-low)/std::tan(elevation)+16,1024.0f);
+            float sx=-sunAzimuth[0]*reach,sy=-sunAzimuth[1]*reach;
+            markRelight(x0+std::min(sx,0.0f),y0+std::min(sy,0.0f),x1+std::max(sx,0.0f),y1+std::max(sy,0.0f),2);
+        }
+    }
+    if(job.lightBounds[2]<0&&job.sunBounds[2]<0)return;
+    job.map=bakeMap;
+    for(int c=0;c<3;++c)job.sunDirection[c]=sunDirection[c];
+    const int *sb=job.sunBounds;
+    job.sunCells.assign(sb[2]>=0?(size_t)(sb[2]-sb[0]+1)*(sb[3]-sb[1]+1):0,-1);
+    job.gridList.clear();
+    for(size_t i=0;i<job.gridCells.size();++i)if(job.gridCells[i])job.gridList.push_back(i);
+    job.gridResults.assign(job.gridList.size(),{});
+    job.done=false;job.running=true;
+    // Half the cores, so the game keeps its own.
+    job.worker=std::thread([&job] {
+        unsigned threads=std::max(1u,std::thread::hardware_concurrency()/2);
+        int y0=std::min(job.lightBounds[1],job.sunBounds[1]),y1=std::max(job.lightBounds[3],job.sunBounds[3]);
+        const int *sb=job.sunBounds;
+        parallelFor(y1-y0+1,[&](int row) {
+            int y=y0+row;
+            for(int x=0;x<mapWidth;++x) {
+                size_t i=(size_t)y*mapWidth+x;uint8_t mark=job.cells[i];
+                if(mark&1)lightCell(job.map,i,job.only);
+                if(mark&2)job.sunCells[(size_t)(y-sb[1])*(sb[2]-sb[0]+1)+(x-sb[0])]=(int16_t)sunCell(job.map,i,job.sunDirection);
+            }
+        },threads);
+        std::vector<int> strips;
+        for(int index:bakeOrder)if(job.strips[index])strips.push_back(index);
+        parallelFor((int)strips.size(),[&](int n) {
+            const BakeStrip &strip=bakeStrips[strips[n]];
+            if(job.strips[strips[n]]&1)lightStrip(job.map,strip,job.only);
+            if(job.strips[strips[n]]&2)sunStrip(job.map,strip,job.sunDirection);
+        },threads);
+        parallelFor((int)job.gridList.size(),[&](int n) {
+            size_t i=job.gridList[n];
+            job.gridResults[n]=staticCellAt(job.map,(int)(i%staticWidth),(int)(i/staticWidth));
+        },threads);
+        job.done=true;
+    });
+}
+void finishRelight(bool apply) {
+    Relight &job=relight;
+    if(!job.running)return;
+    job.worker.join();job.running=false;
+    if(!apply)return;
+    const int *lb=job.lightBounds,*sb=job.sunBounds;
+    if(job.lights&&lb[2]>=0) {
+        int w=lb[2]-lb[0]+1,h=lb[3]-lb[1]+1;
+        gpuUpdateTexture(flatLightTexture,GpuFormat::RGBA8,{{lb[0],lb[1]+floorLight*mapHeight,w,h},{lb[0],lb[1]+ceilingLight*mapHeight,w,h}},
+                         flatLightCells.data(),mapWidth*4);
+        if(job.only)gpuUpdateTexture(flatDirectionTexture,GpuFormat::RGBA8,{{lb[0],lb[1],w,h},{lb[0],lb[1]+mapHeight,w,h}},flatDirectionCells.data(),mapWidth*4);
+        for(size_t n=0;n<job.gridList.size();++n)staticGrid[job.gridList[n]]=job.gridResults[n];
+    }
+    if(job.sun&&sb[2]>=0) {
+        int w=sb[2]-sb[0]+1,h=sb[3]-sb[1]+1;
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+            int16_t visible=job.sunCells[(size_t)y*w+x];
+            if(visible>=0)contactCells[4*((size_t)(sb[1]+y)*mapWidth+sb[0]+x)+2]=(uint8_t)visible;
+        }
+        gpuUpdateTexture(contactTexture,GpuFormat::RGBA8,{{sb[0],sb[1],w,h}},contactCells.data(),mapWidth*4);
+    }
+    std::vector<std::array<int,4>> rects,directions;
+    for(size_t index=0;index<job.strips.size();++index) {
+        if(!job.strips[index])continue;
+        const BakeStrip &strip=bakeStrips[index];
+        rects.push_back({strip.x,strip.y,strip.width,strip.height});
+        if(job.only&&(job.strips[index]&1))directions.push_back(rects.back());
+    }
+    gpuUpdateTexture(wallBakeTexture,GpuFormat::RGBA8,rects,wallBakeCells.data(),atlasStride*4);
+    gpuUpdateTexture(wallDirectionTexture,GpuFormat::RGBA8,directions,wallDirectionCells.data(),atlasWidth*4);
+}
+// Called each frame before geometry: follows sector heights into bakeMap,
+// applies a finished re-bake and starts the next.
+void relightMovingSectors() {
+    if(relight.running&&relight.done)finishRelight();
+    if(!settings.movingRelight||bakeMap.sectors.size()!=(size_t)numsectors)return;
+    for(int i=0;i<numsectors;++i) {
+        BakeSector &s=bakeMap.sectors[i];
+        float floor=bakeHeight(i,false),ceiling=bakeHeight(i,true);
+        if(floor==s.floor&&ceiling==s.ceiling)continue;
+        s.floor=floor;s.ceiling=ceiling;
+        if(std::find(relightPending.begin(),relightPending.end(),i)==relightPending.end())relightPending.push_back(i);
+    }
+    if(!relight.running&&!relightPending.empty())startRelight();
 }
 void geometry(const Uniforms &camera,float fraction) {
     for(auto &batch:batches)batch.second.clear();
@@ -3285,31 +3638,42 @@ void loadSettings() {
             if(!strcmp(key,"dust_motes"))settings.dust=v;
             if(!strcmp(key,"player_shadow"))settings.playerShadow=v;
             if(!strcmp(key,"door_light"))settings.doorLight=v;
+            if(!strcmp(key,"moving_relight"))settings.movingRelight=v;
             if(!strcmp(key,"texel_lighting"))settings.texelLight=v;
             if(!strcmp(key,"sky_light"))settings.skyLight=v;
             if(!strcmp(key,"baked_occlusion"))settings.bakedAO=v;
             if(!strcmp(key,"decoration_shadows"))settings.thingShadows=v;
             if(!strcmp(key,"light_flow"))settings.lightFlow=v;
             if(!strcmp(key,"ceiling_caustics"))settings.ceilingCaustics=v;
+            if(!strcmp(key,"caustics_computed"))settings.causticsComputed=v;
+            if(!strcmp(key,"caustics_grow"))settings.causticsGrow=v;
+            if(!strcmp(key,"caustics_angle"))settings.causticsAngle=v;
+            if(!strcmp(key,"caustics_sway"))settings.causticsSway=v;
+            if(!strcmp(key,"caustics_sprites"))settings.causticsSprites=v;
+            if(!strcmp(key,"caustics_shots"))settings.causticsShots=v;
+            if(!strcmp(key,"damp_shores"))settings.dampShores=v;
             if(!strcmp(key,"glossy_screens"))settings.glossyScreens=v;
             if(!strcmp(key,"sun_shafts"))settings.sunShafts=v;
             if(!strcmp(key,"sun_disc"))settings.sunDisc=v;
+            if(!strcmp(key,"sun_scatter"))settings.sunScatter=v;
+            if(!strcmp(key,"varied_highlights"))settings.variedHighlights=v;
             if(!strcmp(key,"bake_only_lights"))settings.bakeOnlyLights=v;
             if(!strcmp(key,"grid_sprite_light"))settings.gridSpriteLight=v;
+            if(!strcmp(key,"unoccluded_surface_lights"))settings.unoccludedSurfaceLights=v;
         }
     } fclose(file);
 }
 void saveSettings() {
     FILE *file=fopen(graphicsConfig,"w"); if(!file)return;
     fprintf(file,"accelerated %d\nwidescreen %d\nfilter %d\ncrosshair %d\nlook %d\nretro %d\nfps %d\nscale %d\nfov %.1f\nsprite_filter %d\nemissive %d\nflashlight_tint %.2f\nfog %d\npalette %d\nsurface_detail %d\nsoft_light %d\nreflections %d\nretro_reflections %d\nsun_shadows %d\nbaked_lights %d\nbounce_light %d\ncaustics %d\n"
-        "blood %d\nblood_shine %d\nflashlight_shadows %d\nsoft_effects %d\nheat_haze %d\neye_adaptation %d\nsplashes %d\ndust_motes %d\nplayer_shadow %d\ndoor_light %d\ntexel_lighting %d\n"
-        "sky_light %d\nbaked_occlusion %d\ndecoration_shadows %d\nlight_flow %d\nceiling_caustics %d\nglossy_screens %d\nsun_shafts %d\nsun_disc %d\n"
-        "bake_only_lights %d\ngrid_sprite_light %d\ndetail_textures %d\ndetail_strength %.2f\ndetail_scale %.0f\ndetail_fade %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n",
+        "blood %d\nblood_shine %d\nflashlight_shadows %d\nsoft_effects %d\nheat_haze %d\neye_adaptation %d\nsplashes %d\ndust_motes %d\nplayer_shadow %d\ndoor_light %d\nmoving_relight %d\ntexel_lighting %d\n"
+        "sky_light %d\nbaked_occlusion %d\ndecoration_shadows %d\nlight_flow %d\nceiling_caustics %d\ncaustics_computed %d\ncaustics_grow %d\ncaustics_angle %d\ncaustics_sway %d\ncaustics_sprites %d\ncaustics_shots %d\ndamp_shores %d\nglossy_screens %d\nsun_shafts %d\nsun_disc %d\nsun_scatter %d\nvaried_highlights %d\n"
+        "bake_only_lights %d\ngrid_sprite_light %d\nunoccluded_surface_lights %d\ndetail_textures %d\ndetail_strength %.2f\ndetail_scale %.0f\ndetail_fade %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n",
         settings.accelerated,settings.widescreen,settings.filter,settings.crosshair,settings.look,settings.retro,settings.fps,settings.scale,settings.fov,settings.spriteFilter,settings.emissive,settings.flashlightTintGain,settings.fog,settings.palette,settings.detail,settings.softLight,settings.reflections,settings.retroReflections,settings.sun,settings.bakedLights,settings.bounce,settings.caustics,
         settings.blood,settings.bloodShine,settings.flashlightShadows,settings.softSprites,settings.heatHaze,settings.eyeAdaptation,settings.splashes,
-        settings.dust,settings.playerShadow,settings.doorLight,settings.texelLight,
-        settings.skyLight,settings.bakedAO,settings.thingShadows,settings.lightFlow,settings.ceilingCaustics,settings.glossyScreens,settings.sunShafts,settings.sunDisc,
-        settings.bakeOnlyLights,settings.gridSpriteLight,settings.detailTextures,settings.detailStrength,settings.detailScale,settings.detailFade,settings.sharpSoftness,settings.paletteMips);
+        settings.dust,settings.playerShadow,settings.doorLight,settings.movingRelight,settings.texelLight,
+        settings.skyLight,settings.bakedAO,settings.thingShadows,settings.lightFlow,settings.ceilingCaustics,settings.causticsComputed,settings.causticsGrow,settings.causticsAngle,settings.causticsSway,settings.causticsSprites,settings.causticsShots,settings.dampShores,settings.glossyScreens,settings.sunShafts,settings.sunDisc,settings.sunScatter,settings.variedHighlights,
+        settings.bakeOnlyLights,settings.gridSpriteLight,settings.unoccludedSurfaceLights,settings.detailTextures,settings.detailStrength,settings.detailScale,settings.detailFade,settings.sharpSoftness,settings.paletteMips);
     fclose(file);
 }
 void settingsChanged() {applySettings();saveSettings();tickTime=0;}
@@ -3330,6 +3694,7 @@ void sceneInit(SDL_Window *window) {
     if(paletteOption&&paletteOption+1<myargc)settings.palette=atoi(myargv[paletteOption+1])!=0;
 }
 void sceneShutdown() {
+    finishRelight(false);
     R_AcceleratedView=nullptr;R_BeforeTic=nullptr;R_MuzzleFlash=nullptr;R_WallImpact=nullptr;R_BloodHit=nullptr;r_uncapped=0;v_overlayactive=0;
     flashPulses.clear();lightBlockers.clear();flashes={};
     flashlightTint={};flashlightTargetTint={};flashlightTime=0;flashlightSampleTime=0;
@@ -3338,10 +3703,10 @@ void sceneShutdown() {
     burstBarrels.clear();scorches.clear();seamCells.clear();contactCells.clear();bakeStrips.clear();bakeOrder.clear();wallBakeCells.clear();flatLightCells.clear();bakeMap={};
     bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();staticFog.clear();
     wallDirectionCells.clear();flatDirectionCells.clear();wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;bakeOnlyActive=false;
-    wallBakeTexture=nullptr;flatLightTexture=nullptr;causticTexture=nullptr;causticPattern=nullptr;sunBaked=false;sunLevel=0;lightBakeKey=-1;bounceKey=-1;ambientKey=-1;flowKey=-1;bakeThingsKey=-1;skyLevel=0;bakedLightsActive=false;seamTexture=nullptr;contactTexture=nullptr;oldHeights.clear();wallDecals.clear();debris.clear();decalBatches.clear();particleVertices.clear();
+    wallBakeTexture=nullptr;flatLightTexture=nullptr;causticTexture=nullptr;causticPattern=nullptr;shoreTexture=nullptr;sunBaked=false;sunLevel=0;lightBakeKey=-1;bounceKey=-1;ambientKey=-1;flowKey=-1;bakeThingsKey=-1;skyLevel=0;bakedLightsActive=false;seamTexture=nullptr;contactTexture=nullptr;oldHeights.clear();wallDecals.clear();debris.clear();decalBatches.clear();particleVertices.clear();
     sectorMist.clear();mistVertices.clear();skyVertices.clear();cloudTexture=nullptr;sunShafts.clear();shaftVertices.clear();skyOpeningOf.clear();skyOpenings.clear();
     bloodFloors.clear();bloodWalls.clear();bloodPools.clear();pooledCorpses.clear();bloodShades.clear();bloodShadesLoaded=false;
-    splashWatch.clear();rings.clear();heatVertices.clear();doorPortals.clear();steadyLights.clear();adaptedLight=-1;exposure=1;
+    splashWatch.clear();rings.clear();heatVertices.clear();doorPortals.clear();relightPending.clear();steadyLights.clear();adaptedLight=-1;exposure=1;
 }
 // Binds a batch texture with its next animation frame and crossfade amount.
 // The engine switches frames before leveltime++, so the phase uses leveltime-1.
@@ -3400,10 +3765,15 @@ FrameView prepareFrame(int w,int h) {
     camera.effects[2]=players[displayplayer].fixedcolormap;
     camera.effects[3]=settings.spriteFilter;camera.materials[0]=settings.emissive;
     // Bit flags: 1 surface detail, 2 retro reflections, 4 caustics, 8 texel-aligned bake,
-    // 16 ceiling caustics, 32 light flow, 64 baked occlusion, 128 glossy screens.
+    // 16 ceiling caustics, 32 light flow, 64 baked occlusion, 128 glossy screens,
+    // caustics: 256 computed layers, 512 growing shapes, 1024 reflection angle, 2048 sway, 4096 sprites,
+    // 8192 shots; 16384 damp shores; 32768 varied highlights.
     camera.flashlightTint[3]=(settings.detail?1:0)+(settings.retroReflections?2:0)+(settings.caustics&&causticTexture?4:0)+(settings.texelLight?8:0)+
         (settings.caustics&&settings.ceilingCaustics&&causticTexture?16:0)+(settings.lightFlow&&flowKey>=0&&flowKey==bakeThingsKey?32:0)+
-        (settings.bakedAO&&ambientKey>=0&&ambientKey==bakeThingsKey?64:0)+(settings.glossyScreens?128:0);
+        (settings.bakedAO&&ambientKey>=0&&ambientKey==bakeThingsKey?64:0)+(settings.glossyScreens?128:0)+
+        (settings.causticsComputed?256:0)+(settings.causticsGrow?512:0)+(settings.causticsAngle?1024:0)+(settings.causticsSway?2048:0)+
+        (settings.causticsSprites?4096:0)+(settings.causticsShots?8192:0)+(settings.dampShores&&shoreTexture?16384:0)+
+        (settings.detail&&settings.variedHighlights?32768:0);
     camera.map[0]=mapOrigin[0];camera.map[1]=mapOrigin[1];camera.map[2]=1/mapCell;
     camera.map[3]=settings.softLight&&seamTexture&&worldPending;
     camera.materials[2]=settings.fog&&worldPending;
@@ -3431,6 +3801,7 @@ FrameView prepareFrame(int w,int h) {
     if(worldPending) {
         if(levelSerial!=r_levelserial||floors.empty())buildMap();
         syncBakeThings();
+        relightMovingSectors();
         if(settings.sun&&!sunBaked)bakeSun();
         bool sun=settings.sun&&sunLevel>0;
         for(int c=0;c<3;++c)camera.sun[c]=sun?sunTint[c]:0;
@@ -3458,6 +3829,12 @@ FrameView prepareFrame(int w,int h) {
         camera.fog[1]=0.012f;camera.fog[2]=fogReferenceHeight;
         camera.fog[3]=(leveltime+fraction)/TICRATE;
         renderFraction=fraction;
+        // Caustics follow the liquid's frame and crossfade like its floor (surfaceBinding).
+        if(!causticFrames.empty()&&causticSpeed>0&&leveltime>0) {
+            auto at=std::find(causticFrames.begin(),causticFrames.end(),flattranslation[causticFrames[0]]);
+            camera.texFilter[2]=at!=causticFrames.end()?float(at-causticFrames.begin()):0;
+            camera.texFilter[3]=((leveltime-1)%causticSpeed+fraction)/causticSpeed;
+        }
         geometry(camera,fraction);
         // Surface lights come from this frame's geometry; the bake applies from the next frame.
         if(settings.bakedLights&&lightBakeKey!=lightBakeInputs())bakeLights();

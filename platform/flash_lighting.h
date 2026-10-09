@@ -66,6 +66,9 @@ static inline float doom_flash_at(float x,float y,float z,const doom_flash_t *f,
         float cone=fminf(1,fmaxf(0,(cosine-f->direction[3])/(0.985f-f->direction[3])));
         falloff*=cone*cone*(3-2*cone);
     }
+    /* A glowing panel's span (flashAt in lighting.glsl): the heights s on it
+     * whose rays pass every opening narrow to [low,high]. */
+    float extent=f->direction[3]>0?0:f->direction[0],low=-extent,high=extent;
     for(uint32_t i=f->first;i<f->first+f->count;++i) {
         const doom_light_blocker_t *b=&blockers[i];
         float ex=b->line[2]-b->line[0],ey=b->line[3]-b->line[1];
@@ -74,11 +77,16 @@ static inline float doom_flash_at(float x,float y,float z,const doom_flash_t *f,
         if(fabsf(det)<0.0001f) continue;
         float t=doom_flash_cross(ox,oy,ex,ey)/det,u=doom_flash_cross(ox,oy,dx,dy)/det;
         if(t>0.001f&&t<0.999f&&u>=0&&u<=1) {
-            float hit=f->position[2]+dz*t;
-            if(hit<=b->opening[0]+0.02f||hit>=b->opening[1]-0.02f) return 0;
+            float hit=f->position[2]+dz*t,lever=1-t;
+            float bottom=b->opening[0]+0.02f,top=b->opening[1]-0.02f;
+            if(bottom>=top) return 0;
+            float below=(bottom-hit)/lever,above=(top-hit)/lever;
+            if(below>=high||above<=low) return 0;
+            low=fmaxf(low,below);high=fminf(high,above);
         }
     }
-    return f->strength*falloff*falloff*(3.0f-2.0f*falloff);
+    float visible=extent>0?(high-low)/(2*extent):1;
+    return f->strength*falloff*falloff*(3.0f-2.0f*falloff)*visible;
 }
 /* Exact blocker culling; dropping a line never changes doom_flash_at. Lines
  * beyond the radius cannot be crossed, nor can openings spanning every reachable

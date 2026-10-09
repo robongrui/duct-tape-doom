@@ -104,7 +104,7 @@ takes a screenshot.
 
 - **Walls and floors:** crisp pixels, smooth bilinear, or sharp bilinear, which keeps texels flat and only softens the step between them (**Edge softness** sets how far). **Palette mipmaps** keep distant smooth or sharp surfaces from shimmering.
 - **Sprites:** pixel-art upscale (xBR), crisp pixels, or soft bilinear filtering.
-- **Bump detail and metal gloss:** derived from the WAD artwork, plus rounded sprite lighting with rim light on backlit enemies; affects dynamic lights only.
+- **Bump detail and metal gloss:** derived from the WAD artwork, plus rounded sprite lighting with rim light on backlit enemies; affects dynamic lights only. Optional **varied highlights** make them tight on smooth artwork and broad on busy artwork.
 - **Detail textures:** a fine grain that shows only up close, off by default, with its **strength**.
 - **Emissive textures:** glowing lamp strips, computer displays, lava and nukage, with soft bloom and colored light on nearby surfaces.
 - **Glossy monitor screens:** screens in computer textures get curved CRT glass that bends the picture and catches highlights.
@@ -115,6 +115,7 @@ takes a screenshot.
 - **Soft light seams and contact shading:** sector light blends over a short band across openings, and floors, ceilings and wall bases darken near walls.
 - **Sector light flow:** brighter sectors light the floors and walls beyond their openings, so flickering rooms flicker faintly next door. Doors count as closed, as they start.
 - **Door light spill:** when a door opens, light from the brighter room spills through it, scaled by how far the door is open.
+- **Moving doors re-light:** baked lamp light and sunlight follow doors, lifts and lowering walls. As a door rises, the light beyond it steps in under its edge in 8-unit steps, re-baked around the door on a background thread. Bounce, sky light, light flow and sunbeams still use the level's starting state.
 - **Eye adaptation:** moving between bright and dark areas briefly over- or underexposes the view, stepped in sixteenths like Doom's light levels.
 - **Flashlight tint:** the middle is the default, and fully left disables it.
 - **Flashlight silhouettes:** things in the beam throw a hard-edged sprite silhouette onto the wall behind them.
@@ -123,18 +124,19 @@ takes a screenshot.
 **Atmosphere**
 
 - **Atmospheric fog:** height fog with soft cloud layers over pits, liquids and damaging floors. Toggle it off for a clearer view or a lighter GPU workload.
-- **Sunbeams** (with sun shadows), **sun in the sky** and **dust motes** that glint in sunbeams and the flashlight beam.
+- **Sunbeams** (with sun shadows, optionally **scattering** brighter toward the sun), **sun in the sky** and **dust motes** that glint in sunbeams and the flashlight beam.
 - **Heat haze:** rows of Doom pixels shimmer sideways at the tic rate above lava, red-hot damaging floors and flames.
 - **Blood splats and pools:** hitscan hits leave splats on the floor and on walls close behind the target, and corpses grow a pool in steps. **Wet blood shine** makes fresh blood glint under dynamic lights before it dries matte.
 - **Soft effect sprites:** explosions, puffs and teleport fog no longer slice into walls, and dissolve on an ordered dither where they meet floors and ceilings.
-- **Liquids:** reflections of the scene in nearby water, nukage, slime and blood (rendered a second time at half resolution), optionally in **retro PS1 style** at quarter resolution with palette colors; caustics on the surrounding walls and optionally the ceilings; and splashes with ripple rings where things land or wade.
+- **Liquids:** reflections of the scene in nearby water, nukage, slime and blood (rendered a second time at half resolution), optionally in **retro PS1 style** at quarter resolution with palette colors; caustics on the surrounding walls and optionally the ceilings; damp shores, where the walls and banks just above the liquid turn darker; and splashes with ripple rings where things land or wade.
 
-**Performance** (off by default; needs baked static lights)
+**Performance** (off by default; the first two need baked static lights)
 
 - **Bake-only static lights:** torches, lamps and glowing textures stop costing per-frame light work; shots, explosions and the flashlight stay dynamic.
 - **Grid lighting for monsters:** monsters and items take static light from a grid baked at level load instead of tracing rays every frame.
+- **Unblocked glowing-texture light:** light from lamp strips and glowing flats skips the per-pixel wall tests; cheaper near light panels, but their highlights can show on shiny surfaces through walls.
 
-All settings are saved in `graphics.cfg`. The effect switches there are named `blood`, `blood_shine`, `flashlight_shadows`, `soft_effects`, `heat_haze`, `eye_adaptation`, `splashes`, `dust_motes`, `player_shadow`, `door_light`, `texel_lighting`, `sky_light`, `baked_occlusion`, `decoration_shadows`, `light_flow` and `ceiling_caustics`.
+All settings are saved in `graphics.cfg`. The effect switches there are named `blood`, `blood_shine`, `flashlight_shadows`, `soft_effects`, `heat_haze`, `eye_adaptation`, `splashes`, `dust_motes`, `player_shadow`, `door_light`, `texel_lighting`, `sky_light`, `baked_occlusion`, `decoration_shadows`, `light_flow`, `ceiling_caustics`, `caustics_computed`, `caustics_grow`, `caustics_angle`, `caustics_sway`, `caustics_sprites`, `caustics_shots`, `damp_shores` and `unoccluded_surface_lights`.
 
 Animated flats and walls (NUKAGE, FWATER, falls) crossfade between frames,
 door and lift movement is interpolated between game tics, and bullets leave
