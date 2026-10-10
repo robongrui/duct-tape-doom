@@ -577,7 +577,7 @@ void weldFloors() {
     constexpr float snap=0.05f,cell=64;
     std::unordered_map<int64_t,std::vector<Point>> grid;
     auto key=[](int x,int y){return (int64_t)x<<32|(uint32_t)y;};
-    auto cellOf=[](float v){return (int)std::floor(v/cell);};
+    auto cellOf=[&](float v){return (int)std::floor(v/cell);}; // MSVC wants cell captured.
     auto weld=[&](Point p) {
         int cx=cellOf(p.x),cy=cellOf(p.y);
         for(int y=cy-1;y<=cy+1;++y)for(int x=cx-1;x<=cx+1;++x) {
