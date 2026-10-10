@@ -97,6 +97,8 @@ std::string valueText(const Option &option) {
         for(size_t i=0;i<option.values.size();++i)if(option.values[i]==*option.flag)return option.items[i];
         return option.items.front();
     }
+    size_t step=(size_t)std::lround((*option.number-option.low)/option.step);
+    if(step<option.items.size())return option.items[step];
     char value[16];
     snprintf(value,sizeof(value),option.step>=1?"%.0f":"%.2f",*option.number);
     return value;

@@ -39,7 +39,6 @@ int P_PicAnimationNext(boolean istexture,int pic,int *next);
 #include "scene3d.h"
 #include "emissive.h"
 #include "screen_glass.h"
-#include "detail_texture.h"
 #include "surface_lighting.h"
 #include "baked_lighting.h"
 #include "weapon_lighting.h"
@@ -3709,10 +3708,7 @@ void loadSettings() {
         else if(!strcmp(key,"filter")) settings.filter=std::clamp((int)value,0,2);
         else if(!strcmp(key,"sharp_softness")) settings.sharpSoftness=std::clamp(value,0.0f,1.0f);
         else if(!strcmp(key,"palette_mipmaps")) settings.paletteMips=value!=0;
-        else if(!strcmp(key,"detail_textures")) settings.detailTextures=std::clamp((int)value,0,2);
-        else if(!strcmp(key,"detail_strength")) settings.detailStrength=std::clamp(value,0.05f,0.6f);
-        else if(!strcmp(key,"detail_scale")) settings.detailScale=std::clamp(std::round(value),2.0f,8.0f);
-        else if(!strcmp(key,"detail_fade")) settings.detailFade=std::clamp(value,32.0f,256.0f);
+        else if(!strcmp(key,"msaa")) settings.msaa=std::clamp(std::round(value),0.0f,3.0f);
         else {
             int v=value!=0;
             if(!strcmp(key,"accelerated"))settings.accelerated=v;
@@ -3770,12 +3766,12 @@ void saveSettings() {
     fprintf(file,"accelerated %d\nwidescreen %d\nfilter %d\ncrosshair %d\nlook %d\nretro %d\nfps %d\nscale %d\nfov %.1f\nsprite_filter %d\nemissive %d\nflashlight_tint %.2f\nfog %d\npalette %d\nsurface_detail %d\nsoft_light %d\nreflections %d\nretro_reflections %d\nsun_shadows %d\nbaked_lights %d\nbounce_light %d\ncaustics %d\n"
         "blood %d\nblood_shine %d\nflashlight_shadows %d\nsoft_effects %d\nheat_haze %d\neye_adaptation %d\nsplashes %d\ndust_motes %d\nplayer_shadow %d\ndoor_light %d\nmoving_relight %d\ntexel_lighting %d\n"
         "sky_light %d\nbaked_occlusion %d\ndecoration_shadows %d\nlight_flow %d\nceiling_caustics %d\ncaustics_computed %d\ncaustics_grow %d\ncaustics_angle %d\ncaustics_sway %d\ncaustics_sprites %d\ncaustics_shots %d\ndamp_shores %d\nglossy_screens %d\nweapon_lighting %d\nsun_shafts %d\nsun_disc %d\nsun_scatter %d\nvaried_highlights %d\n"
-        "bake_only_lights %d\ngrid_sprite_light %d\nunoccluded_surface_lights %d\nfewer_surface_lights %d\ndetail_textures %d\ndetail_strength %.2f\ndetail_scale %.0f\ndetail_fade %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n",
+        "bake_only_lights %d\ngrid_sprite_light %d\nunoccluded_surface_lights %d\nfewer_surface_lights %d\nmsaa %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n",
         settings.accelerated,settings.widescreen,settings.filter,settings.crosshair,settings.look,settings.retro,settings.fps,settings.scale,settings.fov,settings.spriteFilter,settings.emissive,settings.flashlightTintGain,settings.fog,settings.palette,settings.detail,settings.softLight,settings.reflections,settings.retroReflections,settings.sun,settings.bakedLights,settings.bounce,settings.caustics,
         settings.blood,settings.bloodShine,settings.flashlightShadows,settings.softSprites,settings.heatHaze,settings.eyeAdaptation,settings.splashes,
         settings.dust,settings.playerShadow,settings.doorLight,settings.movingRelight,settings.texelLight,
         settings.skyLight,settings.bakedAO,settings.thingShadows,settings.lightFlow,settings.ceilingCaustics,settings.causticsComputed,settings.causticsGrow,settings.causticsAngle,settings.causticsSway,settings.causticsSprites,settings.causticsShots,settings.dampShores,settings.glossyScreens,settings.weaponLighting,settings.sunShafts,settings.sunDisc,settings.sunScatter,settings.variedHighlights,
-        settings.bakeOnlyLights,settings.gridSpriteLight,settings.unoccludedSurfaceLights,settings.fewerSurfaceLights,settings.detailTextures,settings.detailStrength,settings.detailScale,settings.detailFade,settings.sharpSoftness,settings.paletteMips);
+        settings.bakeOnlyLights,settings.gridSpriteLight,settings.unoccludedSurfaceLights,settings.fewerSurfaceLights,settings.msaa,settings.sharpSoftness,settings.paletteMips);
     fclose(file);
 }
 void settingsChanged() {applySettings();saveSettings();tickTime=0;}
@@ -3818,13 +3814,6 @@ SurfaceBinding surfaceBinding(int key) {
     int pic=key>=0?key:-1-key-firstflat,nextPic=0;
     bool flat=key<0&&pic>=0&&pic<numflats;
     int speed=key>=0||flat?P_PicAnimationNext(key>=0,pic,&nextPic):0;
-    // Detail textures: walls and flats pick a grain from their own colors
-    // once; animated ones (liquids, falls, fire) take none.
-    if((key>=0||flat)&&image.detail<0) {
-        const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
-        image.detail=doom_detail_class(image.width,image.height,image.pixels.data(),palette);
-    }
-    float detail=(key>=0||flat)&&speed==0?float((image.detail&3)+1):0,detailSwap=image.detail>=4?1.0f:0.0f;
     if((key>=0||flat)&&leveltime>0) {
         if(speed>0) {
             const Image &candidate=key>=0?wallImage(nextPic):lumpImage(firstflat+nextPic,true);
@@ -3833,7 +3822,7 @@ SurfaceBinding surfaceBinding(int key) {
             }
         }
     }
-    return {&image,next,blend,detail,detailSwap};
+    return {&image,next,blend};
 }
 // A sphere that misses a triangle's bounds cannot illuminate any fragment
 // of it. The conservative mask preserves every light inside its radius.
@@ -3950,11 +3939,6 @@ FrameView prepareFrame(int w,int h) {
     // through the dimmed backdrop and soften the panel's text.
     camera.materials[1]=settings.emissive&&worldPending&&camera.effects[2]==0&&!I_Render3DSettingsOpen();
     camera.fx[0]=1;
-    // Detail textures: smooth grain with smooth walls and floors, stepped
-    // grain over crisp pixels only when asked for.
-    bool detailed=settings.detailTextures==2||(settings.detailTextures==1&&settings.filter);
-    camera.detail[0]=detailed&&worldPending?settings.detailStrength:0;
-    camera.detail[1]=settings.detailScale;camera.detail[2]=settings.detailFade;
     float uiWidth=std::min((float)w,h*4.0f/3),uiHeight=uiWidth*0.75f,uiX=(w-uiWidth)/2;
     float uiY=worldPending&&settings.widescreen?h-uiHeight:(h-uiHeight)/2;
     float worldX=uiX+uiWidth*viewwindowx/320,worldY=uiY+uiHeight*viewwindowy/200.0f;

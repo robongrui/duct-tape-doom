@@ -28,6 +28,8 @@ GpuTextureRef gpuCreateTexture(GpuFormat format,int width,int height,const void 
 void gpuUpdateTexture(const GpuTextureRef &texture,GpuFormat format,const std::vector<std::array<int,4>> &rects,const void *pixels,int bytesPerRow);
 // Reads an emissive mask image as value*alpha in [0,1]; false if unreadable or the wrong size.
 bool platformReadMask(const char *path,int width,int height,std::vector<float> &values);
+// The most MSAA samples the GPU offers for the world targets (1: none).
+int gpuMaxSamples();
 
 namespace doom3d {
 constexpr float doomPi=3.14159265358979323846f;
@@ -38,12 +40,10 @@ struct Point { float x,y; };
 // (x, y, z as unorm bytes) and how much of it comes from that direction (w).
 struct Vertex { float x,y,z,u,v,light; unsigned mode; float red=0,green=0,blue=0; unsigned lightMask[2]={}; float sunU=-1,sunV=0; unsigned statics=0; };
 // fx: exposure, sky light tint; fx2: render-target pixels per Doom pixel,
-// sky light level (0: off); detail: detail texture strength (0: off),
-// detail pixels per texture pixel, fade distance; texFilter: sharp bilinear
-// edge softness in texels, palette mipmaps (0: off); ripple: liquid rings (x, y, radius, strength);
+// sky light level (0: off); texFilter: sharp bilinear edge softness in texels, palette mipmaps (0: off); ripple: liquid rings (x, y, radius, strength);
 // flicker: the current light of the baked flicker groups, group 0 steady.
-struct Uniforms { float eye[4],right[4],forward[4],up[4],projection[4],effects[4],materials[4],flashlightTint[4],fog[4],map[4],water[4],sun[4],bake[4],fx[4],fx2[4],detail[4],texFilter[4],ripple[4][4],flicker[4][4]; };
-static_assert(sizeof(Vertex)==60&&sizeof(Uniforms)==400,"Shader buffer layout");
+struct Uniforms { float eye[4],right[4],forward[4],up[4],projection[4],effects[4],materials[4],flashlightTint[4],fog[4],map[4],water[4],sun[4],bake[4],fx[4],fx2[4],texFilter[4],ripple[4][4],flicker[4][4]; };
+static_assert(sizeof(Vertex)==60&&sizeof(Uniforms)==384,"Shader buffer layout");
 using Flash=doom_flash_t;
 // 63 lights keep the FlashSet uniform block under 4 KB and fit the 64-bit light masks.
 constexpr unsigned maxLights=63;
@@ -54,6 +54,7 @@ struct FogLights { unsigned count=0,indices[4]={},padding[3]={}; };
 static_assert(sizeof(FogLights)==32,"Fog shader layout");
 struct Settings {
     int accelerated=1, widescreen=1, crosshair=1, look=1, retro=0, fps=1, scale=100;
+    float msaa=0; // Geometry edge anti-aliasing: 0 off, then 2x, 4x and 8x MSAA (capped by gpuMaxSamples).
     // Walls and floors: 0 crisp pixels, 1 smooth (bilinear), 2 sharp bilinear
     // (flat texels, edges blended over sharpSoftness texels plus a pixel).
     int filter=0;
@@ -102,11 +103,6 @@ struct Settings {
     int sunScatter=1; // Sunbeams glow brighter seen toward the sun and fainter from behind it.
     int glossyScreens=1; // Monitor glass found in computer textures bulges, refracts the screen behind it and catches light.
     int weaponLighting=1; // The weapon's painted sheen and light come out at load; lights around the player relight it.
-    // Detail textures: 0 off, 1 with smooth or sharp walls and floors, 2 always
-    // (stepped grain on crisp pixels). Strength scales the grain's contrast,
-    // scale is detail pixels per texture pixel, fade the distance it is gone by.
-    int detailTextures=0;
-    float detailStrength=0.1f,detailScale=7,detailFade=256;
     // Performance: cheaper stand-ins for per-frame light work.
     int bakeOnlyLights=0; // Static lights only in the bake, with its light direction and flicker groups; pools as area lights.
     int gridSpriteLight=0; // Things take static light and their shadow light from a grid baked at level load.
@@ -115,7 +111,7 @@ struct Settings {
 };
 // glassFrame: on textures with monitor screens, where each glass pixel sits
 // on its screen (see screen_glass.h); null otherwise.
-struct Image { bool opaque=true; std::vector<byte> pixels; GpuTextureRef texture,glassFrame; int width=0,height=0,left=0,top=0; std::array<float,3> glow={1,1,1}; float glowWeight=0; std::array<float,3> emissionColor={}; float emissionWeight=0,emissionCoverage=0,emissionU=0,emissionV=0; std::array<float,3> average={}; bool averaged=false; int detail=-1; };
+struct Image { bool opaque=true; std::vector<byte> pixels; GpuTextureRef texture,glassFrame; int width=0,height=0,left=0,top=0; std::array<float,3> glow={1,1,1}; float glowWeight=0; std::array<float,3> emissionColor={}; float emissionWeight=0,emissionCoverage=0,emissionU=0,emissionV=0; std::array<float,3> average={}; bool averaged=false; };
 
 // Frame profiling for the performance smoke test (I_Render3DProfile).
 struct Profile { bool enabled=false; unsigned skip=0; const char *screenshotPath=nullptr; I_Render3DFrameProfile frame={}; };
@@ -152,9 +148,7 @@ struct FrameView {
     Uniforms camera;
     float uiX,uiY,uiWidth,uiHeight,worldX,worldY,worldW,worldH;
 };
-// detail: 1 + detail texture layer, 0 for none (animated textures: liquids,
-// falls, fire); detailSwap: fibres run along u.
-struct SurfaceBinding { const Image *image,*next; float blend,detail,detailSwap; };
+struct SurfaceBinding { const Image *image,*next; float blend; };
 struct SpriteDraw { const Image *image; std::vector<Vertex> vertices; };
 
 // Lifecycle: init reads options and graphics.cfg, the backend may override

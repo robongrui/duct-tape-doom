@@ -3,7 +3,10 @@
    get slow and why.
 
    doom-perf-smoke <iwad> [-maps MAP01,E1M2] [-spacing 512] [-budget 16.7]
-                   [-out perf-report] [-strict] [engine options]
+                   [-out perf-report] [-strict] [-at x,y[,facing]] [engine options]
+
+   -at times just that spot (facing east, north, west or south, or all four),
+   for re-checking a slow view the report found; use it with one map.
 
    The world stays paused while the view moves from spot to spot, facing the
    four compass directions at each. Every frame waits for the GPU, so CPU and
@@ -62,6 +65,7 @@ static const char *facing_names[4] = {"east", "north", "west", "south"};
 static map_t maps[MAX_MAPS];
 static int map_count, map_index = -1;
 static int spacing = 512, strict, skill_given;
+static int at_x, at_y, at_yaw = -1, at_set; /* -at: one spot, optionally one facing. */
 static double budget = 1000.0 / 60;
 static const char *out_dir = "perf-report";
 static const char *map_filter;
@@ -200,6 +204,12 @@ static void find_spots(void)
     spot_count = 0;
     for (int i = 0; i < columns * rows; ++i)
         if (nearest[i] >= 0) spots[spot_count++] = spots[i];
+    if (at_set)
+    {
+        spots[0].x = at_x * FRACUNIT; spots[0].y = at_y * FRACUNIT;
+        spots[0].sector = (int)(R_PointInSubsector(spots[0].x, spots[0].y)->sector - sectors);
+        spot_count = 1;
+    }
     free(nearest);
     free(samples);
     samples = malloc(sizeof(sample_t) * (spot_count * 4 + 1));
@@ -217,6 +227,7 @@ static void place(const spot_t *spot, int yaw)
     mo->floorz = mo->subsector->sector->floorheight;
     mo->ceilingz = mo->subsector->sector->ceilingheight;
     mo->z = mo->floorz; mo->momx = mo->momy = mo->momz = 0;
+    if (at_yaw >= 0) yaw = at_yaw;
     mo->angle = (angle_t)yaw * ANG90;
     player->viewheight = VIEWHEIGHT; player->deltaviewheight = 0;
     player->viewz = mo->z + VIEWHEIGHT;
@@ -586,7 +597,7 @@ int main(int argc, char **argv)
 {
     if (argc < 2 || argv[1][0] == '-')
     {
-        fprintf(stderr, "Usage: %s <iwad> [-maps MAP01,E1M2] [-spacing units] [-budget ms] [-out dir] [-strict] [engine options]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <iwad> [-maps MAP01,E1M2] [-spacing units] [-budget ms] [-out dir] [-strict] [-at x,y[,facing]] [engine options]\n", argv[0]);
         return 1;
     }
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
@@ -599,6 +610,12 @@ int main(int argc, char **argv)
     {
         if (!strcmp(argv[i], "-maps") && i + 1 < argc) map_filter = argv[++i];
         else if (!strcmp(argv[i], "-spacing") && i + 1 < argc) spacing = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-at") && i + 1 < argc)
+        {
+            char facing[16] = "";
+            at_set = sscanf(argv[++i], "%d,%d,%15s", &at_x, &at_y, facing) >= 2;
+            for (int k = 0; k < 4; ++k) if (!strcmp(facing, facing_names[k])) at_yaw = k;
+        }
         else if (!strcmp(argv[i], "-budget") && i + 1 < argc) budget = atof(argv[++i]);
         else if (!strcmp(argv[i], "-out") && i + 1 < argc) out_dir = argv[++i];
         else if (!strcmp(argv[i], "-strict")) strict = 1;

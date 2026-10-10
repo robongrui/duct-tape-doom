@@ -96,6 +96,7 @@ takes a screenshot.
 
 - **Renderer:** accelerated 3D or the classic 320×200 software view.
 - **Resolution:** native pixels, 75%, or 50% for a lighter GPU workload.
+- **Anti-aliasing (MSAA):** off by default, or 2x, 4x or 8x as far as the GPU offers; smooths the edges of walls, floors and ledges while texels and sprites stay crisp.
 - **Field of view:** 60–120 degrees, measured against the classic 4:3 view.
 - **Widescreen:** show more world at the sides rather than stretching it.
 - **Mouse look, crosshair and FPS display:** optional toggles.
@@ -106,7 +107,6 @@ takes a screenshot.
 - **Walls and floors:** crisp pixels, smooth bilinear, or sharp bilinear, which keeps texels flat and only softens the step between them (**Edge softness** sets how far). **Palette mipmaps** keep distant smooth or sharp surfaces from shimmering.
 - **Sprites:** crisp pixels (default), pixel-art upscale (xBR), or soft bilinear filtering.
 - **Bump detail and metal gloss:** derived from the WAD artwork, plus rounded sprite lighting with rim light on backlit enemies; affects dynamic lights only. Optional **varied highlights** make them tight on smooth artwork and broad on busy artwork.
-- **Detail textures:** a fine grain that shows only up close, off by default, with its **strength**.
 - **Emissive textures:** glowing lamp strips, computer displays, lava and nukage, with soft bloom and colored light on nearby surfaces.
 - **Glossy monitor screens:** screens in computer textures get curved CRT glass that bends the picture and catches highlights.
 
@@ -136,6 +136,7 @@ takes a screenshot.
 - **Bake-only static lights:** torches, lamps and glowing textures stop costing per-frame light work; shots, explosions and the flashlight stay dynamic.
 - **Grid lighting for monsters:** monsters and items take static light from a grid baked at level load instead of tracing rays every frame.
 - **Unblocked glowing-texture light:** light from lamp strips and glowing flats skips the per-pixel wall tests; cheaper near light panels, but their highlights can show on shiny surfaces through walls.
+- **Fewer glowing-texture lights:** only the 8 nearest lamp strips and glowing flats light their surroundings per pixel, not 24; farther ones keep their baked glow but lose their moving highlights.
 
 All settings are saved in `graphics.cfg`. The effect switches there are named `blood`, `blood_shine`, `flashlight_shadows`, `soft_effects`, `heat_haze`, `eye_adaptation`, `splashes`, `dust_motes`, `player_shadow`, `door_light`, `texel_lighting`, `sky_light`, `baked_occlusion`, `decoration_shadows`, `light_flow`, `ceiling_caustics`, `caustics_computed`, `caustics_grow`, `caustics_angle`, `caustics_sway`, `caustics_sprites`, `caustics_shots`, `damp_shores` and `unoccluded_surface_lights`.
 

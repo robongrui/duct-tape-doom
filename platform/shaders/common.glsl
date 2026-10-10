@@ -6,11 +6,10 @@
 struct Flash { vec4 position; float strength; uint first,count; float baked; vec4 color,direction; };
 struct LightBlocker { vec4 line,opening; };
 // fx: exposure, sky light tint; fx2: render-target pixels per Doom pixel,
-// sky light level (0: off), sun yaw, sun disc strength (0: off); detail: detail texture strength (0: off), detail
-// pixels per texture pixel, fade distance; texFilter: sharp bilinear edge
-// softness in texels, palette mipmaps (0: off); ripple: liquid rings (x, y, radius, strength);
+// sky light level (0: off), sun yaw, sun disc strength (0: off); texFilter:
+// sharp bilinear edge softness in texels, palette mipmaps (0: off); ripple: liquid rings (x, y, radius, strength);
 // flicker: the current light of the baked flicker groups, group 0 steady.
-#define CAMERA_BLOCK { vec4 eye,right,forward,up,projection,effects,materials,flashlightTint,fog,map,water,sun,bake,fx,fx2,detail,texFilter; vec4 ripple[4]; vec4 flicker[4]; }
+#define CAMERA_BLOCK { vec4 eye,right,forward,up,projection,effects,materials,flashlightTint,fog,map,water,sun,bake,fx,fx2,texFilter; vec4 ripple[4]; vec4 flicker[4]; }
 #define FLASH_BLOCK { uint flashCount,flashReserved0,flashReserved1,flashReserved2; Flash lights[63]; }
 // count, then four light indices, then padding (see doom3d::FogLights).
 #define FOG_BLOCK { uvec4 fogA,fogB; }

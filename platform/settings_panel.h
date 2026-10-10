@@ -13,7 +13,7 @@ struct Option {
     OptionKind kind;
     const char *title,*tip;
     int *flag=nullptr;              // Check and Choice
-    std::vector<const char*> items; // Choice: one item per entry in values
+    std::vector<const char*> items; // Choice: one item per entry in values; Slider: a label per step, if any
     std::vector<int> values;
     float *number=nullptr;          // Slider
     double low=0,high=1,step=0.05;

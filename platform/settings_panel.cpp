@@ -3,6 +3,8 @@ extern "C" {
 #include "doomtype.h"
 }
 #include <SDL3/SDL.h>
+#include <algorithm>
+#include <cmath>
 #include "settings_panel.h"
 
 namespace doom3d {
@@ -16,9 +18,9 @@ Option choice(const char *title,int *flag,std::vector<const char*> items,std::ve
     option.flag=flag;option.items=items;option.values=values;option.enabled=enabled;return option;
 }
 Option slider(const char *title,float *number,double low,double high,double step,const char *tip,
-              OptionCondition enabled=nullptr) {
+              OptionCondition enabled=nullptr,std::vector<const char*> labels={}) {
     Option option{};option.kind=OptionKind::Slider;option.title=title;option.tip=tip;
-    option.number=number;option.low=low;option.high=high;option.step=step;option.enabled=enabled;
+    option.number=number;option.low=low;option.high=high;option.step=step;option.enabled=enabled;option.items=labels;
     return option;
 }
 }
@@ -31,6 +33,10 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                     "The 3D renderer draws the world at your window's pixel resolution; classic is the original 320x200 view."),
                 choice("Resolution",&s.scale,{"Native (100%)","75%","50%"},{100,75,50},
                     "Lower resolutions lighten the GPU workload."),
+                slider("Anti-aliasing (MSAA)",&s.msaa,0,std::max(1.0,std::log2((double)gpuMaxSamples())),1,
+                    "Smooths the stair-steps along the edges of walls, floors and ledges. Texels, sprites and bars stay crisp. "
+                    "Each step costs more GPU time.",
+                    [](const Settings &){return gpuMaxSamples()>1;},{"Off","2x","4x","8x"}),
                 slider("Field of view",&s.fov,60,120,5,"Measured against the classic 4:3 view."),
                 check("Widescreen",&s.widescreen,"Show more world at the sides rather than stretching it.")}},
             {"View",{
@@ -64,12 +70,7 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                 check("Relit weapon",&s.weaponLighting,
                     "The sheen and light painted into the weapon artwork are taken out, and the lights around you relight it: "
                     "their color, darker rounded edges, glowing rims against lights behind it, and highlights that slide over "
-                    "the metal as you look around and the weapon bobs."),
-                choice("Detail textures",&s.detailTextures,{"Off","With filtered walls","Always"},{0,1,2},
-                    "A fine grain over walls and floors that shows only up close and fades out with distance, picked per texture "
-                    "from its colors (stone, metal, wood, flesh). Scale and distance are in graphics.cfg (detail_scale, detail_fade)."),
-                slider("Detail strength",&s.detailStrength,0.05,0.6,0.05,"How far the grain lightens and darkens the artwork.",
-                    [](const Settings &d){return d.detailTextures!=0;})}},
+                    "the metal as you look around and the weapon bobs.")}},
             {"Glow",{
                 check("Emissive textures",&s.emissive,
                     "Lamp strips, computer displays, lava and nukage glow with soft bloom and colored light on nearby surfaces."),

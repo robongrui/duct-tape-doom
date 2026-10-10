@@ -22,7 +22,6 @@ extern boolean paused;
 #include "i_render3d.h"
 #include "scene3d.h"
 #include "gpu_shaders.h"
-#include "detail_texture.h"
 
 struct GpuTexture {
     SDL_GPUTexture *texture;
@@ -36,7 +35,8 @@ SDL_GPUShaderFormat shaderFormat;
 SDL_GPUCommandBuffer *uploadCommand; // Texture uploads, submitted before the frame that uses them.
 SDL_GPUTextureFormat depthFormat,swapchainFormat;
 SDL_GPUSampleCount sampleCount=SDL_GPU_SAMPLECOUNT_1;
-SDL_GPUSampler *linearRepeat,*linearClamp,*nearestClamp,*detailSampler;
+int maxSamples=1;bool forceSingleSample=false;
+SDL_GPUSampler *linearRepeat,*linearClamp,*nearestClamp;
 SDL_GPUShader *worldVertexShader,*reflectVertexShader,*screenVertexShader,*skyVertexShader;
 SDL_GPUGraphicsPipeline *opaquePipeline,*skyPipeline,*skySurfacePipeline,*reflectSkySurfacePipeline,*worldPipeline,*shadowPipeline,*decalPipeline,*particlePipeline,*heatPipeline,
     *weaponPipeline,*hudPipeline,*solidPipeline,*mistPipeline,*shaftPipeline,*overlayWeaponPipeline,*overlayHudPipeline,*overlaySolidPipeline,
@@ -44,7 +44,7 @@ SDL_GPUGraphicsPipeline *opaquePipeline,*skyPipeline,*skySurfacePipeline,*reflec
     *settingsPipeline;
 SDL_GPUTexture *settingsTexture,*hudTexture,*paletteTexture,*paletteLUT,*dummySeam,*dummyContact,*dummyBake,*solidTexel,
     *multisampleTexture,*colorTexture,*depthTexture,*sceneDepth,*emissionTexture,*emissionDepth,*bloomScratch,*bloomTexture,
-    *reflectionTexture,*reflectionDepth,*detailTexture;
+    *reflectionTexture,*reflectionDepth;
 int width,height,reflectionWidth,reflectionHeight;
 std::array<unsigned,256> paletteKey;
 struct Arena { SDL_GPUBuffer *buffer=nullptr; Uint32 capacity=0; };
@@ -85,36 +85,6 @@ void flushUploads() {
     if(uploadCommand&&!SDL_SubmitGPUCommandBuffer(uploadCommand))
         fprintf(stderr,"GPU upload failed: %s\n",SDL_GetError());
     uploadCommand=nullptr;
-}
-// Detail texture layers (detail_texture.h) with their full mip chains, so
-// distant and grazing surfaces average back to the neutral 0.5.
-SDL_GPUTexture *createDetailTexture() {
-    SDL_GPUTextureCreateInfo info={};
-    info.type=SDL_GPU_TEXTURETYPE_2D_ARRAY;info.format=SDL_GPU_TEXTUREFORMAT_R8_UNORM;info.usage=SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    info.width=info.height=DOOM_DETAIL_SIZE;info.layer_count_or_depth=DOOM_DETAIL_LAYERS;info.num_levels=DOOM_DETAIL_LEVELS;
-    info.sample_count=SDL_GPU_SAMPLECOUNT_1;
-    SDL_GPUTexture *texture=SDL_CreateGPUTexture(device,&info);
-    if(!texture)return nullptr;
-    std::vector<byte> levels(doom_detail_bytes());
-    if(doom_detail_build(levels.data(),0.16f)!=levels.size()) {SDL_ReleaseGPUTexture(device,texture);return nullptr;}
-    SDL_GPUTransferBufferCreateInfo transferInfo={SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,(Uint32)levels.size(),0};
-    SDL_GPUTransferBuffer *transfer=SDL_CreateGPUTransferBuffer(device,&transferInfo);
-    if(!transfer) {SDL_ReleaseGPUTexture(device,texture);return nullptr;}
-    memcpy(SDL_MapGPUTransferBuffer(device,transfer,false),levels.data(),levels.size());
-    SDL_UnmapGPUTransferBuffer(device,transfer);
-    if(!uploadCommand)uploadCommand=SDL_AcquireGPUCommandBuffer(device);
-    SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(uploadCommand);
-    Uint32 offset=0;
-    for(Uint32 level=0,size=DOOM_DETAIL_SIZE;level<DOOM_DETAIL_LEVELS;++level,size/=2)
-        for(Uint32 layer=0;layer<DOOM_DETAIL_LAYERS;++layer,offset+=size*size) {
-            SDL_GPUTextureTransferInfo source={transfer,offset,size,size};
-            SDL_GPUTextureRegion target={};
-            target.texture=texture;target.mip_level=level;target.layer=layer;target.w=target.h=size;target.d=1;
-            SDL_UploadToGPUTexture(copy,&source,&target,false);
-        }
-    SDL_EndGPUCopyPass(copy);
-    SDL_ReleaseGPUTransferBuffer(device,transfer);
-    return texture;
 }
 void updatePaletteLUT(const unsigned *palette) {
     if(paletteLUT&&std::equal(palette,palette+256,paletteKey.begin()))return;
@@ -206,8 +176,8 @@ SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vertex,SDL_GPUShader *fragment,
 bool createPipelines() {
     worldVertexShader=VERTEX_SHADER(world_vert,1);reflectVertexShader=VERTEX_SHADER(reflect_vert,2);
     screenVertexShader=VERTEX_SHADER(screen_vert,0);skyVertexShader=VERTEX_SHADER(sky_vert,0);
-    SDL_GPUShader *world=FRAGMENT_SHADER(world_frag,16,2,4),*opaque=FRAGMENT_SHADER(opaque_frag,16,2,4);
-    SDL_GPUShader *cutout=FRAGMENT_SHADER(cutout_frag,16,2,4),*coverage=FRAGMENT_SHADER(coverage_frag,16,2,4);
+    SDL_GPUShader *world=FRAGMENT_SHADER(world_frag,15,2,4),*opaque=FRAGMENT_SHADER(opaque_frag,15,2,4);
+    SDL_GPUShader *cutout=FRAGMENT_SHADER(cutout_frag,15,2,4),*coverage=FRAGMENT_SHADER(coverage_frag,15,2,4);
     SDL_GPUShader *sky=FRAGMENT_SHADER(sky_frag,2,0,3),*skySurface=FRAGMENT_SHADER(sky_surface_frag,2,0,3),*shadow=FRAGMENT_SHADER(shadow_frag,1,0,0),*decal=FRAGMENT_SHADER(decal_frag,1,0,0);
     SDL_GPUShader *particle=FRAGMENT_SHADER(particle_frag,0,0,0),*solid=FRAGMENT_SHADER(solid_frag,0,0,0),*hud=FRAGMENT_SHADER(hud_frag,1,0,0);
     SDL_GPUShader *heat=FRAGMENT_SHADER(heat_frag,0,0,0);
@@ -255,6 +225,13 @@ bool createPipelines() {
         if(!p)return false;
     return true;
 }
+void releasePipelines() {
+    for(SDL_GPUGraphicsPipeline **p:{&opaquePipeline,&skyPipeline,&skySurfacePipeline,&reflectSkySurfacePipeline,&worldPipeline,&shadowPipeline,&decalPipeline,&particlePipeline,&heatPipeline,
+            &weaponPipeline,&hudPipeline,&solidPipeline,&mistPipeline,&shaftPipeline,&overlayWeaponPipeline,&overlayHudPipeline,&overlaySolidPipeline,
+            &reflectOpaquePipeline,&reflectSkyPipeline,&reflectWorldPipeline,&emissionPipeline,&blurPipeline,&presentPipeline,&depthPipeline,&prepassPipeline,&coveragePipeline,&cutoutPipeline,
+            &settingsPipeline})
+        release(*p);
+}
 SDL_GPUSampler *sampler(SDL_GPUFilter filter,SDL_GPUSamplerAddressMode address) {
     SDL_GPUSamplerCreateInfo info={};
     info.min_filter=info.mag_filter=filter;info.mipmap_mode=SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
@@ -283,6 +260,18 @@ void allocateTargets(int w,int h) {
     bloomTexture=createTexture(glow,bw,bh,target);
     emissionDepth=createTexture(depthFormat,bw,bh,SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
     if(!emissionTexture||!bloomScratch||!bloomTexture||!emissionDepth) I_Error((char*)"Could not allocate bloom targets");
+}
+// The world targets' sample count from the MSAA setting, capped by the GPU;
+// changing it rebuilds the pipelines and the targets.
+void applySampleCount() {
+    int wanted=forceSingleSample?1:std::min(maxSamples,settings.msaa>0?1<<(int)std::lround(settings.msaa):1);
+    SDL_GPUSampleCount count=wanted>=8?SDL_GPU_SAMPLECOUNT_8:wanted>=4?SDL_GPU_SAMPLECOUNT_4:wanted>=2?SDL_GPU_SAMPLECOUNT_2:SDL_GPU_SAMPLECOUNT_1;
+    if(count==sampleCount&&opaquePipeline)return;
+    SDL_WaitForGPUIdle(device);
+    releasePipelines();sampleCount=count;
+    if(!createPipelines())I_Error((char*)"Could not create the GPU pipelines for %dx MSAA",wanted);
+    releaseTargets();width=height=0;
+    fprintf(stderr,"GPU anti-aliasing: %dx MSAA.\n",wanted);
 }
 // One copy pass per frame uploads every vertex batch and the light/sector data.
 void reserve(Arena &arena,Uint32 bytes,SDL_GPUBufferUsageFlags usage) {
@@ -375,9 +364,9 @@ void bindWorld(SDL_GPURenderPass *pass,SDL_GPUTexture *reflection) {
         {flatLightTexture?gpu(flatLightTexture):dummyBake,nearestClamp},
         {causticTexture?gpu(causticTexture):dummyContact,linearClamp},{causticPattern?gpu(causticPattern):dummyContact,nearestClamp},
         {wallDirectionTexture?gpu(wallDirectionTexture):dummyBake,nearestClamp},{flatDirectionTexture?gpu(flatDirectionTexture):dummyBake,nearestClamp},
-        {dummyBake,nearestClamp},{detailTexture,detailSampler},{shoreTexture?gpu(shoreTexture):dummyContact,linearClamp}};
+        {dummyBake,nearestClamp},{shoreTexture?gpu(shoreTexture):dummyContact,linearClamp}};
     SDL_BindGPUFragmentSamplers(pass,1,&samplers[0],1);
-    SDL_BindGPUFragmentSamplers(pass,3,&samplers[1],13);
+    SDL_BindGPUFragmentSamplers(pass,3,&samplers[1],12);
     SDL_GPUBuffer *storage[]={blockerArena.buffer,sectorArena.buffer};
     SDL_BindGPUFragmentStorageBuffers(pass,0,storage,2);
 }
@@ -392,7 +381,7 @@ void bindSurface(SDL_GPUCommandBuffer *command,SDL_GPURenderPass *pass,int key,U
         SDL_GPUTextureSamplerBinding frame={binding.image->glassFrame?gpu(binding.image->glassFrame):dummyBake,nearestClamp};
         SDL_BindGPUFragmentSamplers(pass,13,&frame,1);
     }
-    float blend[4]={binding.blend,binding.detail,binding.detailSwap,0};
+    float blend[4]={binding.blend,0,0,0};
     SDL_PushGPUFragmentUniformData(command,blendSlot,blend,sizeof(blend));
 }
 void bindImage(SDL_GPURenderPass *pass,const GpuTextureRef &texture,SDL_GPUSampler *filter) {
@@ -584,6 +573,7 @@ void gpuUpdateTexture(const GpuTextureRef &texture,GpuFormat format,const std::v
     SDL_EndGPUCopyPass(copy);
     SDL_ReleaseGPUTransferBuffer(device,transfer);
 }
+int gpuMaxSamples() {return maxSamples;}
 bool platformReadMask(const char *path,int w,int h,std::vector<float> &values) {
     SDL_Surface *loaded=SDL_LoadPNG(path);
     SDL_Surface *surface=loaded?SDL_ConvertSurface(loaded,SDL_PIXELFORMAT_RGBA32):nullptr;
@@ -617,21 +607,16 @@ int I_Render3DInit(SDL_Window *window) {
     const auto sampled=SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET|SDL_GPU_TEXTUREUSAGE_SAMPLER;
     depthFormat=SDL_GPUTextureSupportsFormat(device,SDL_GPU_TEXTUREFORMAT_D32_FLOAT,SDL_GPU_TEXTURETYPE_2D,sampled)?
         SDL_GPU_TEXTUREFORMAT_D32_FLOAT:SDL_GPU_TEXTUREFORMAT_D24_UNORM;
-    sampleCount=SDL_GPUTextureSupportsSampleCount(device,SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,SDL_GPU_SAMPLECOUNT_4)&&
-                SDL_GPUTextureSupportsSampleCount(device,depthFormat,SDL_GPU_SAMPLECOUNT_4)?SDL_GPU_SAMPLECOUNT_4:SDL_GPU_SAMPLECOUNT_1;
-    // Exercise the single-sample depth path on MSAA-capable devices.
+    for(auto [count,samples]:{std::pair{SDL_GPU_SAMPLECOUNT_8,8},{SDL_GPU_SAMPLECOUNT_4,4},{SDL_GPU_SAMPLECOUNT_2,2}})
+        if(SDL_GPUTextureSupportsSampleCount(device,SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,count)&&
+           SDL_GPUTextureSupportsSampleCount(device,depthFormat,count)) {maxSamples=samples;break;}
+    // -gpumsaa 1 keeps the single-sample path whatever the setting says.
     int msaa=M_CheckParm((char*)"-gpumsaa");
-    if(msaa&&msaa+1<myargc&&atoi(myargv[msaa+1])==1)sampleCount=SDL_GPU_SAMPLECOUNT_1;
+    forceSingleSample=msaa&&msaa+1<myargc&&atoi(myargv[msaa+1])==1;
     linearRepeat=sampler(SDL_GPU_FILTER_LINEAR,SDL_GPU_SAMPLERADDRESSMODE_REPEAT);
     linearClamp=sampler(SDL_GPU_FILTER_LINEAR,SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE);
     nearestClamp=sampler(SDL_GPU_FILTER_NEAREST,SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE);
-    // Trilinear and anisotropic, so the grain fades to grey instead of shimmering.
-    SDL_GPUSamplerCreateInfo detailInfo={};
-    detailInfo.min_filter=detailInfo.mag_filter=SDL_GPU_FILTER_LINEAR;detailInfo.mipmap_mode=SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
-    detailInfo.address_mode_u=detailInfo.address_mode_v=detailInfo.address_mode_w=SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-    detailInfo.enable_anisotropy=true;detailInfo.max_anisotropy=8;detailInfo.max_lod=DOOM_DETAIL_LEVELS;
-    detailSampler=SDL_CreateGPUSampler(device,&detailInfo);
-    if(!linearRepeat||!linearClamp||!nearestClamp||!detailSampler||!createPipelines()) {I_Render3DShutdown();return 0;}
+    if(!linearRepeat||!linearClamp||!nearestClamp||!createPipelines()) {I_Render3DShutdown();return 0;}
     hudTexture=createTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,SCREENWIDTH,SCREENHEIGHT,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     settingsTexture=createTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,DOOM_SETTINGS_WIDTH,DOOM_SETTINGS_HEIGHT,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     paletteTexture=createTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,256,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
@@ -639,8 +624,7 @@ int I_Render3DInit(SDL_Window *window) {
     dummyContact=createTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     dummyBake=createTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
     solidTexel=createTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,1,1,SDL_GPU_TEXTUREUSAGE_SAMPLER);
-    detailTexture=createDetailTexture();
-    if(!settingsTexture||!hudTexture||!paletteTexture||!dummySeam||!dummyContact||!dummyBake||!solidTexel||!detailTexture) {I_Render3DShutdown();return 0;}
+    if(!settingsTexture||!hudTexture||!paletteTexture||!dummySeam||!dummyContact||!dummyBake||!solidTexel) {I_Render3DShutdown();return 0;}
     std::array<byte,8> zero={};const byte covered[4]={0,255,0,255}; // Index 0, full coverage, no emission.
     upload(dummySeam,1,1,1,zero.data(),8,1);upload(dummyContact,1,1,1,zero.data(),4,1);upload(dummyBake,1,1,1,zero.data(),4,1);
     upload(solidTexel,1,1,1,covered,4,1);
@@ -648,8 +632,9 @@ int I_Render3DInit(SDL_Window *window) {
     flushUploads();
     sceneInit(window);
     applySettings();
-    fprintf(stderr,"GPU renderer: %s; %dx MSAA, native pixels, widescreen and depth-tested 3D.\n",
-        SDL_GetGPUDeviceDriver(device),(int)(sampleCount==SDL_GPU_SAMPLECOUNT_4?4:1));
+    applySampleCount();
+    fprintf(stderr,"GPU renderer: %s; up to %dx MSAA, native pixels, widescreen and depth-tested 3D.\n",
+        SDL_GetGPUDeviceDriver(device),maxSamples);
     return 1;
 }
 void I_Render3DShutdown(void) {
@@ -657,13 +642,9 @@ void I_Render3DShutdown(void) {
     sceneShutdown();
     flushUploads();
     releaseTargets();release(reflectionTexture);release(reflectionDepth);reflectionWidth=reflectionHeight=0;width=height=0;
-    for(SDL_GPUTexture **t:{&settingsTexture,&hudTexture,&paletteTexture,&paletteLUT,&dummySeam,&dummyContact,&dummyBake,&solidTexel,&detailTexture})release(*t);
-    for(SDL_GPUGraphicsPipeline **p:{&opaquePipeline,&skyPipeline,&skySurfacePipeline,&reflectSkySurfacePipeline,&worldPipeline,&shadowPipeline,&decalPipeline,&particlePipeline,&heatPipeline,
-            &weaponPipeline,&hudPipeline,&solidPipeline,&mistPipeline,&shaftPipeline,&overlayWeaponPipeline,&overlayHudPipeline,&overlaySolidPipeline,
-            &reflectOpaquePipeline,&reflectSkyPipeline,&reflectWorldPipeline,&emissionPipeline,&blurPipeline,&presentPipeline,&depthPipeline,&prepassPipeline,&coveragePipeline,&cutoutPipeline,
-            &settingsPipeline})
-        release(*p);
-    for(SDL_GPUSampler **s:{&linearRepeat,&linearClamp,&nearestClamp,&detailSampler})release(*s,SDL_ReleaseGPUSampler);
+    for(SDL_GPUTexture **t:{&settingsTexture,&hudTexture,&paletteTexture,&paletteLUT,&dummySeam,&dummyContact,&dummyBake,&solidTexel})release(*t);
+    releasePipelines();
+    for(SDL_GPUSampler **s:{&linearRepeat,&linearClamp,&nearestClamp})release(*s,SDL_ReleaseGPUSampler);
     for(Arena *a:{&vertexArena,&blockerArena,&sectorArena}) {release(a->buffer,SDL_ReleaseGPUBuffer);a->capacity=0;}
     release(frameTransfer,SDL_ReleaseGPUTransferBuffer);frameTransferCapacity=0;vertexOffsets.clear();
     if(device) {
@@ -683,6 +664,7 @@ void I_Render3DProfile(int enabled,unsigned skip) {
     SDL_SetGPUSwapchainParameters(device,gameWindow,SDL_GPU_SWAPCHAINCOMPOSITION_SDR,mode);
 }
 void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
+    applySampleCount();
     SDL_GPUCommandBuffer *command=SDL_AcquireGPUCommandBuffer(device);
     if(!command) {fprintf(stderr,"GPU command buffer: %s\n",SDL_GetError());return;}
     SDL_GPUTexture *swapchain=nullptr;Uint32 drawableWidth=0,drawableHeight=0;

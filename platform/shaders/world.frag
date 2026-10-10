@@ -34,20 +34,17 @@ layout(set=2,binding=12) uniform sampler2D flatDirection;
 // glass; this holds, per glass texel, its x and y from its screen's top-left
 // texel, then the screen's width and height.
 layout(set=2,binding=13) uniform sampler2D glassFrame;
-// Detail textures (platform/detail_texture.h): grayscale grain centred on
-// 0.5, one layer per material, with mips that fade back to 0.5.
-layout(set=2,binding=14) uniform sampler2DArray detailMaps;
 // Shorelines (buildShore in scene3d.cpp): signed distance to the nearest
 // liquid edge in r (sampled linearly), that edge's liquid sector and tint.
-layout(set=2,binding=15) uniform sampler2D shore;
+layout(set=2,binding=14) uniform sampler2D shore;
 // Storage buffers follow the samplers in SPIR-V but the four uniform blocks in
 // SDL_gpu's Metal layout; METAL selects the second numbering.
 #ifdef METAL
 #define BLOCKER_BINDING 4
 #define SECTOR_BINDING 5
 #else
-#define BLOCKER_BINDING 16
-#define SECTOR_BINDING 17
+#define BLOCKER_BINDING 15
+#define SECTOR_BINDING 16
 #endif
 // Each light's blockers and per-direction slices (buildLightWords in scene3d.cpp).
 layout(std430,set=2,binding=BLOCKER_BINDING) readonly buffer Blockers { uvec4 lightWords[]; };
@@ -55,9 +52,8 @@ layout(std430,set=2,binding=SECTOR_BINDING) readonly buffer Sectors { vec4 secto
 layout(std140,set=3,binding=0) uniform Camera CAMERA_BLOCK c;
 layout(std140,set=3,binding=1) uniform Lights FLASH_BLOCK;
 layout(std140,set=3,binding=2) uniform Fog FOG_BLOCK;
-// surfaceDetail: 1 + the surface's detail layer, 0 for none; detailSwap:
-// its fibres run along u.
-layout(std140,set=3,binding=3) uniform Blend { float blend,surfaceDetail,detailSwap; };
+// blend: the crossfade toward the animation's next frame.
+layout(std140,set=3,binding=3) uniform Blend { float blend; };
 layout(location=0) out vec4 outColor;
 #define BLOCKERS
 #include "indexed.glsl"
@@ -170,29 +166,6 @@ vec4 surfaceTexture(sampler2D source,vec2 uv,vec2 pixel,float lod) {
     vec4 result=mix(near,far,t);
     if(result.a>0.0) result.rgb/=result.a;
     return result;
-}
-// Detail textures, as in late-90s engines: a fine grain multiplied over the
-// artwork only up close. It fades out by c.detail.z units and where its
-// pixels shrink toward screen pixels, so normal views keep the original look.
-// Smooth walls take a trilinear grain; crisp pixels take one grain value per
-// detail cell, snapped to the texel grid and stepped in 1/16 like colormaps.
-float detailGrain(vec2 uv,float footprint,vec2 duv1,vec2 duv2) {
-    float scale=c.detail.y,layer=surfaceDetail-1.0;
-    if(detailSwap>0.5) {uv=uv.yx;duv1=duv1.yx;duv2=duv2.yx;}
-    float fade=1.0-smoothstep(c.detail.z*0.4,c.detail.z,vDistance);
-    float size=footprint*scale; // Detail pixels per screen pixel.
-    if(c.effects.x>0.0) {
-        fade*=1.0-smoothstep(1.0,2.0,size);
-        if(fade<=0.0) return 1.0;
-        vec2 k=vec2(scale/128.0);
-        float d=textureGrad(detailMaps,vec3(uv*k,layer),duv1*k,duv2*k).r-0.5;
-        return 1.0+d*2.0*c.detail.x*fade;
-    }
-    fade*=1.0-smoothstep(0.3,0.6,size);
-    if(fade<=0.0) return 1.0;
-    ivec2 q=ivec2(floor(uv*scale))&127;
-    float d=texelFetch(detailMaps,ivec3(q,int(layer)),0).r-0.5;
-    return 1.0+round(d*2.0*c.detail.x*fade*16.0)/16.0;
 }
 // Sector light blended across open lines, from cells of this sector or of
 // the neighbor it blends with. Other cells (void, unrelated sectors) are skipped.
@@ -542,9 +515,6 @@ void main() {
     if(blood) color.rgb*=vTint.g;
     // The thick rim of the glass shades the picture's edges, in light steps.
     if(glassy) color.rgb*=round((1.0-0.5*smoothstep(0.7,1.0,max(abs(screen.x),abs(screen.y))))*16.0)/16.0;
-    float grain=1.0;
-    if(!sprite&&!blood&&!glassy&&surfaceDetail>0.0&&c.detail.x>0.0&&c.effects.z==0.0&&(vMode&5u)==0u)
-        grain=detailGrain(uv,footprint,duv1,duv2);
     float light=vLight,sunShare=0.0;
     // Map surfaces carry sector+1 in mode bits 12+; 0 means no sector.
     bool mapped=(vMode>>12)>0u&&!sprite&&c.effects.z==0.0;
@@ -830,9 +800,8 @@ void main() {
         float damp=shoreWet(vWorld,normal,sector,dot(color.rgb,vec3(0.299,0.587,0.114)),stain)*(1.0-emission);
         if(damp>0.0) color.rgb*=mix(vec3(1),vec3(0.55)*mix(vec3(1),stain,0.25),damp);
     }
-    // Glowing texels stay clean of the detail grain.
     vec3 albedo=color.rgb;
-    color.rgb=color.rgb*mix(grain,1.0,emission)*illumination+specular;
+    color.rgb=color.rgb*illumination+specular;
     if(mapped&&(bakeFlags&4u)!=0u&&(abs(normal.z)<=0.5||(normal.z<-0.5&&(bakeFlags&16u)!=0u))) color.rgb+=caustics(vWorld,normal,sector,false);
     // Flag 4096: things in the world (not the weapon, mode 1, or effect sprites, 1024)
     // near liquids catch the caustics too, in their own colors so the painted
