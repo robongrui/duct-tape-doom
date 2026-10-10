@@ -457,6 +457,12 @@ unsigned char	cheat_clev_seq[] =
 };
 
 
+unsigned char	cheat_fly_seq[] =
+{
+    0xb2, 0x26, 0x66, 0x36, 0xba, 0xff	// idfly
+};
+
+
 // my position cheat
 unsigned char	cheat_mypos_seq[] =
 {
@@ -486,6 +492,8 @@ cheatseq_t	cheat_powerup[7] =
 cheatseq_t	cheat_choppers = { cheat_choppers_seq, 0 };
 cheatseq_t	cheat_clev = { cheat_clev_seq, 0 };
 cheatseq_t	cheat_mypos = { cheat_mypos_seq, 0 };
+cheatseq_t	cheat_fly = { cheat_fly_seq, 0 };
+
 
 
 // 
@@ -541,6 +549,16 @@ ST_Responder (event_t* ev)
   // if a user keypress...
   else if (ev->type == ev_keydown)
   {
+    if (P_DebugAllowed () && (ev->data1 == '[' || ev->data1 == ']'))
+    {
+      int	epsd = gameepisode;
+      int	map = gamemap;
+
+      if (G_StepMap (ev->data1 == ']' ? 1 : -1, &epsd, &map))
+	G_DeferedInitNew (gameskill, epsd, map);
+      return true;
+    }
+
     if (!netgame)
     {
       // b. - enabled for more debug fun.
@@ -632,6 +650,15 @@ ST_Responder (event_t* ev)
 	  plyr->message = DEH_String (STSTR_NCON);
 	else
 	  plyr->message = DEH_String (STSTR_NCOFF);
+      }
+      // 'fly' tour mode for checking levels
+      else if (cht_CheckCheat(&cheat_fly, ev->data1))
+      {
+	P_SetTour (plyr, !debugfly);
+	if (debugfly)
+	  plyr->message = "TOUR MODE ON: E/Q UP/DOWN, [ ] CHANGE MAP";
+	else
+	  plyr->message = "TOUR MODE OFF";
       }
       // 'behold?' power-up cheats
       for (i=0;i<6;i++)

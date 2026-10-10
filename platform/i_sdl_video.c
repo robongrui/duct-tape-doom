@@ -55,6 +55,8 @@ static int translate(SDL_Scancode key)
             if (key == SDL_SCANCODE_F12) return KEY_F12;
             if (key == SDL_SCANCODE_COMMA) return ',';
             if (key == SDL_SCANCODE_PERIOD) return '.';
+            if (key == SDL_SCANCODE_LEFTBRACKET) return '[';
+            if (key == SDL_SCANCODE_RIGHTBRACKET) return ']';
             return 0;
     }
 }
@@ -177,10 +179,10 @@ void I_StartTic(void)
             if (accel && I_Render3DIsAccelerated() && scan == SDL_SCANCODE_F &&
                 gamestate == GS_LEVEL && !menuactive && !paused)
             {
+                /* Also passed on, so cheats such as "idfly" can be typed. */
                 if (event.type == SDL_EVENT_KEY_DOWN) I_Render3DToggleFlashlight();
-                continue;
             }
-            if (accel && (scan == SDL_SCANCODE_F4 || scan == SDL_SCANCODE_F7))
+            else if (accel && (scan == SDL_SCANCODE_F4 || scan == SDL_SCANCODE_F7))
             {
                 if (event.type == SDL_EVENT_KEY_DOWN)
                 {

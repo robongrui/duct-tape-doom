@@ -6,6 +6,7 @@ typedef struct {
     int episode_maps;
     int numbered_maps;
     int full_game;
+    int has_palette; /* PLAYPAL: missing from DOOM 64 and other non-DOOM games. */
 } doom_wad_info;
 
 /* Check the directory before offering a file in the launcher. */

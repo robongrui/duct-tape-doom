@@ -182,9 +182,9 @@ if(DOOM_BUILD_SDL)
         add_custom_command(TARGET doom POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DOOM_GAME_DATA}" "$<TARGET_FILE_DIR:doom>/default.wad")
     endif()
-    if(BUILD_TESTING AND DOOM_GAME_DATA)
+    if(BUILD_TESTING)
         function(doom_add_smoke target renderer)
-            add_executable(${target} tests/native_smoke.c platform/i_sdl_video.c
+            add_executable(${target} ${ARGN} platform/i_sdl_video.c
                 platform/i_sdl_sound.c platform/i_opl_music.c platform/i_singleplayer.c
                 platform/i_portable_system.c)
             target_compile_definitions(${target} PRIVATE DOOM_TEST_DRIVER)
@@ -195,18 +195,30 @@ if(DOOM_BUILD_SDL)
                 target_link_libraries(${target} PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
             endif()
         endfunction()
+        # Plays every map of a WAD and reports slow views and their causes:
+        # doom-perf-smoke <iwad> [-maps MAP01,MAP02] [-spacing units] [-budget ms]
+        if(DOOM_RENDER3D)
+            doom_add_smoke(doom-perf-smoke ON tests/perf_smoke.c)
+        endif()
+    endif()
+    if(BUILD_TESTING AND DOOM_GAME_DATA)
         file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/smoke-data")
-        doom_add_smoke(doom-native-smoke OFF)
+        doom_add_smoke(doom-native-smoke OFF tests/native_smoke.c)
         add_test(NAME native-gameplay-save-load COMMAND doom-native-smoke "${DOOM_GAME_DATA}")
         set_tests_properties(native-gameplay-save-load PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/smoke-data"
             ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy"
             TIMEOUT 30)
         if(DOOM_TEST_GPU)
-            doom_add_smoke(doom-gpu-smoke ON)
+            doom_add_smoke(doom-gpu-smoke ON tests/native_smoke.c)
             add_test(NAME gpu-gameplay-save-load COMMAND doom-gpu-smoke "${DOOM_GAME_DATA}")
             set_tests_properties(gpu-gameplay-save-load PROPERTIES
                 WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/smoke-data" TIMEOUT 60)
+            # One map, coarsely: checks the profiling path, not the timings.
+            add_test(NAME gpu-performance-smoke COMMAND doom-perf-smoke "${DOOM_GAME_DATA}" -maps E1M1 -spacing 1024
+                -out perf-smoke -graphics smoke-graphics.cfg)
+            set_tests_properties(gpu-performance-smoke PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/smoke-data" TIMEOUT 120)
         endif()
     endif()
 endif()
@@ -246,6 +258,9 @@ if(BUILD_TESTING)
         add_executable(doom-baked-lighting-tests tests/baked_lighting.cpp)
         target_compile_features(doom-baked-lighting-tests PRIVATE cxx_std_17)
         add_test(NAME baked-lighting-rays COMMAND doom-baked-lighting-tests)
+        add_executable(doom-weapon-lighting-tests tests/weapon_lighting.cpp)
+        target_compile_features(doom-weapon-lighting-tests PRIVATE cxx_std_17)
+        add_test(NAME weapon-delighting COMMAND doom-weapon-lighting-tests)
     endif()
     add_executable(doom-screen-glass-tests tests/screen_glass.c)
     if(UNIX AND NOT APPLE)

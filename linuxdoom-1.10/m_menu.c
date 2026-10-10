@@ -64,6 +64,10 @@ rcsid[] = "$Id: m_menu.c,v 1.7 1997/02/03 22:45:10 b1 Exp $";
 #include "m_menu.h"
 #include "d_deh.h"
 
+// p_user.c; p_local.h clashes with <fcntl.h> here.
+boolean P_DebugAllowed (void);
+void P_SetCheat (player_t* player, boolean* setting, boolean on);
+
 
 
 extern patch_t*		hu_font[HU_FONTSIZE];
@@ -446,6 +450,57 @@ menu_t  SoundDef =
     80,64,
     0
 };
+
+//
+// CHEAT MENU (F5): renderer debugging aids.
+//
+void M_CheatFly(int choice);
+void M_CheatNoclip(int choice);
+void M_CheatGod(int choice);
+void M_CheatMonsters(int choice);
+void M_CheatGive(int choice);
+void M_CheatPick(int choice);
+void M_CheatWarp(int choice);
+void M_CheatRestart(int choice);
+void M_DrawCheats(void);
+
+enum
+{
+    dbg_fly,
+    dbg_noclip,
+    dbg_god,
+    dbg_monsters,
+    dbg_give,
+    dbg_pick,
+    dbg_warp,
+    dbg_restart,
+    dbg_end
+} cheat_e;
+
+menuitem_t CheatMenu[]=
+{
+    {2,"",M_CheatFly,'f'},
+    {2,"",M_CheatNoclip,'n'},
+    {2,"",M_CheatGod,'g'},
+    {2,"",M_CheatMonsters,'m'},
+    {1,"",M_CheatGive,'a'},
+    {2,"",M_CheatPick,'p'},
+    {1,"",M_CheatWarp,'w'},
+    {1,"",M_CheatRestart,'r'}
+};
+
+menu_t  CheatDef =
+{
+    dbg_end,
+    NULL,
+    CheatMenu,
+    M_DrawCheats,
+    72,36,
+    0
+};
+
+static int	cheatepisode;
+static int	cheatmap;
 
 //
 // LOAD GAME MENU
@@ -1568,7 +1623,17 @@ boolean M_Responder (event_t* ev)
 	    S_StartSound(NULL,sfx_swtchn);
 	    return true;
 				
-	  case KEY_F5:            // Detail toggle
+	  case KEY_F5:            // Cheat menu, or detail outside levels
+	    if (gamestate == GS_LEVEL && P_DebugAllowed())
+	    {
+		M_StartControlPanel();
+		currentMenu = &CheatDef;
+		itemOn = CheatDef.lastOn;
+		cheatepisode = gameepisode;
+		cheatmap = gamemap;
+		S_StartSound(NULL,sfx_swtchn);
+		return true;
+	    }
 	    M_ChangeDetail(0);
 	    S_StartSound(NULL,sfx_swtchn);
 	    return true;
@@ -1681,6 +1746,10 @@ boolean M_Responder (event_t* ev)
 	}
 	return true;
 		
+      case KEY_F5:
+	if (currentMenu != &CheatDef)
+	    break;
+	// fall through: F5 also closes the cheat menu
       case KEY_ESCAPE:
 	currentMenu->lastOn = itemOn;
 	M_ClearMenus ();
@@ -1719,6 +1788,101 @@ boolean M_Responder (event_t* ev)
     return false;
 }
 
+
+
+//
+// Cheat menu
+//
+void M_DrawCheats(void)
+{
+    player_t*	player = &players[consoleplayer];
+    boolean	on[dbg_give] =
+    {
+	debugfly,
+	(player->cheats & CF_NOCLIP) != 0,
+	(player->cheats & CF_GODMODE) != 0,
+	debugnomonsters
+    };
+    char*	labels[dbg_end] =
+    {
+	"FLY", "NO CLIPPING", "GOD MODE", "NO MONSTERS",
+	"GIVE WEAPONS AND KEYS", "MAP", "WARP TO MAP", "RESTART MAP"
+    };
+    char	mapname[16];
+    int		i;
+    int		y;
+
+    M_WriteText(160 - M_StringWidth("CHEATS")/2, 16, "CHEATS");
+    for (i = 0; i < dbg_end; i++)
+    {
+	y = CheatDef.y + i*LINEHEIGHT + 1;
+	M_WriteText(CheatDef.x, y, labels[i]);
+	if (i < dbg_give)
+	    M_WriteText(CheatDef.x + 150, y, on[i] ? "ON" : "OFF");
+    }
+    if (gamemode == commercial)
+	sprintf(mapname, "< MAP%02d >", cheatmap);
+    else
+	sprintf(mapname, "< E%dM%d >", cheatepisode, cheatmap);
+    M_WriteText(CheatDef.x + 150, CheatDef.y + dbg_pick*LINEHEIGHT + 1, mapname);
+    M_WriteText(CheatDef.x - 32, 172, "FLYING: LOOK AND MOVE, E/Q UP/DOWN");
+    M_WriteText(CheatDef.x - 32, 182, "IN GAME: [ ] PREVIOUS/NEXT MAP");
+}
+
+void M_CheatFly(int choice)
+{
+    P_SetCheat(&players[consoleplayer], &debugfly, !debugfly);
+}
+
+void M_CheatNoclip(int choice)
+{
+    player_t*	player = &players[consoleplayer];
+    P_SetCheat(player, &debugnoclip, !(player->cheats & CF_NOCLIP));
+}
+
+void M_CheatGod(int choice)
+{
+    player_t*	player = &players[consoleplayer];
+    P_SetCheat(player, &debuggod, !(player->cheats & CF_GODMODE));
+}
+
+void M_CheatMonsters(int choice)
+{
+    debugnomonsters = !debugnomonsters;
+}
+
+void M_CheatGive(int choice)
+{
+    player_t*	player = &players[consoleplayer];
+    int		i;
+
+    player->armorpoints = deh_idkfa_armor;
+    player->armortype = deh_idkfa_armor_class;
+    for (i=0;i<NUMWEAPONS;i++)
+	player->weaponowned[i] = true;
+    for (i=0;i<NUMAMMO;i++)
+	player->ammo[i] = player->maxammo[i];
+    for (i=0;i<NUMCARDS;i++)
+	player->cards[i] = true;
+    player->message = DEH_String (STSTR_KFAADDED);
+}
+
+void M_CheatPick(int choice)
+{
+    G_StepMap(choice ? 1 : -1, &cheatepisode, &cheatmap);
+}
+
+void M_CheatWarp(int choice)
+{
+    M_ClearMenus();
+    G_DeferedInitNew(gameskill, cheatepisode, cheatmap);
+}
+
+void M_CheatRestart(int choice)
+{
+    M_ClearMenus();
+    G_DeferedInitNew(gameskill, gameepisode, gamemap);
+}
 
 
 //

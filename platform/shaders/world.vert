@@ -12,6 +12,8 @@ layout(location=5) in uvec2 inLightMask;
 layout(location=6) in vec2 inSun;
 layout(location=7) in uint inStatic;
 layout(std140,set=1,binding=0) uniform Camera CAMERA_BLOCK c;
+// The depth prepass and the shading pass must place every pixel identically.
+invariant gl_Position;
 #ifdef REFLECT
 // Mirrored-camera pass: geometry below the surface never appears in the reflection.
 layout(std140,set=1,binding=1) uniform Plane { float plane; };

@@ -27,6 +27,45 @@ void I_Render3DSettingsMouse(float x, float y, int button);
 void I_Render3DScreenshot(void);
 void I_Render3DToggleFlashlight(void);
 int I_Render3DIsAccelerated(void);
+/* Frame profiling for the performance smoke test (tests/perf_smoke.c). While
+   enabled, frames present without vsync and each waits for the GPU so its
+   time can be read; the view stays level. skip leaves out lights of the kinds
+   1 << I_RENDER3D_LIGHT_* and the I_RENDER3D_SKIP_* passes, so their cost
+   shows as the difference. */
+enum {
+    I_RENDER3D_LIGHT_FLASHLIGHT, I_RENDER3D_LIGHT_SHOT, I_RENDER3D_LIGHT_BARREL,
+    I_RENDER3D_LIGHT_DECORATION, I_RENDER3D_LIGHT_PROJECTILE, I_RENDER3D_LIGHT_DOOR,
+    I_RENDER3D_LIGHT_SURFACE, I_RENDER3D_LIGHT_FOG, I_RENDER3D_LIGHT_KINDS
+};
+#define I_RENDER3D_SKIP_LIGHTS 0xffu
+#define I_RENDER3D_SKIP_REFLECTIONS (1u << 8)
+#define I_RENDER3D_SKIP_BLOOM (1u << 9)
+#define I_RENDER3D_SKIP_FOG (1u << 10)
+#define I_RENDER3D_SKIP_MIST (1u << 11)
+typedef struct {
+    float x, y, z, radius;
+    int kind;      /* I_RENDER3D_LIGHT_* */
+    int thing;     /* The source thing's mobjtype_t, or -1. */
+    int blockers;  /* Wall segments each pixel it reaches tests. */
+    int triangles; /* World triangles within its radius. */
+    float perPixel; /* Blockers a pixel tests on average, with slices. */
+} I_Render3DLightProfile;
+typedef struct {
+    unsigned serial;  /* Counts profiled frames. */
+    int world;        /* The frame drew the 3D view. */
+    double cpuMs;     /* Building, encoding and submitting the frame. */
+    double gpuMs;     /* From submission until the GPU finished. */
+    double prepareMs; /* Scene build, including level-load bakes. */
+    double geometryMs, lightsMs, spritesMs, masksMs;
+    int lights, blockers, triangles, litTriangles, lightTriangles, reflection;
+    I_Render3DLightProfile light[64];
+} I_Render3DFrameProfile;
+void I_Render3DProfile(int enabled, unsigned skip);
+const I_Render3DFrameProfile *I_Render3DLastFrame(void);
+/* Drops lights still fading in or out from the previous view. */
+void I_Render3DProfileTeleported(void);
+/* The next screenshot goes to path instead of Screenshots/. */
+void I_Render3DScreenshotTo(const char *path);
 #ifdef __cplusplus
 }
 #endif

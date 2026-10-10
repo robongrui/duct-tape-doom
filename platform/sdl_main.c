@@ -90,13 +90,14 @@ static int choose_from_folder(const char *base, const char *bundled, char **game
     char **names = SDL_GlobDirectory(folder, "*.wad", SDL_GLOB_CASEINSENSITIVE, &count);
     if (!names) return 0;
     char *bases[MAX_CHOICES], *addons[MAX_CHOICES];
-    int base_count = 0, addon_count = 0, invalid = 0;
+    int base_count = 0, addon_count = 0, invalid = 0, other_game = 0;
     for (int i = 0; i < count; ++i)
     {
         char *path = NULL;
         doom_wad_info info;
         if (!SDL_asprintf(&path, "%s/%s", folder, names[i])) continue;
         if (!DOOM_ProbeWad(path, &info)) invalid = 1;
+        else if (info.is_iwad && !info.has_palette) other_game = 1;
         else if (info.is_iwad && (info.episode_maps || info.numbered_maps) && base_count < MAX_CHOICES)
         { bases[base_count++] = path; continue; }
         else if (!info.is_iwad && addon_count < MAX_CHOICES)
@@ -114,8 +115,9 @@ static int choose_from_folder(const char *base, const char *bundled, char **game
     if (file) fclose(file);
     if (!base_count && !addon_count)
     {
-        if (invalid) notice("The WAD files in the wads folder are damaged or unsupported.");
-        result = invalid ? -1 : 0;
+        if (other_game) notice("The wads folder holds a game WAD in another format, such as DOOM 64. Only DOOM, DOOM II, Final DOOM and Freedoom game WADs can be played.");
+        else if (invalid) notice("The WAD files in the wads folder are damaged or unsupported.");
+        result = invalid || other_game ? -1 : 0;
         goto done;
     }
     if (!base_count)

@@ -55,9 +55,8 @@ static inline float doom_flash_fade(int elapsed,float fraction) {
     float age=fmaxf(0.0f,(elapsed-2+fraction)/5.0f);
     return fmaxf(0.0f,1.0f-age);
 }
-static inline float doom_flash_at(float x,float y,float z,const doom_flash_t *f,
-                                const doom_light_blocker_t *blockers) {
-    float dx=x-f->position[0],dy=y-f->position[1],dz=z-f->position[2];
+/* The light's falloff and cone toward (dx, dy, dz) from it, before walls. */
+static inline float doom_flash_reach(float dx,float dy,float dz,const doom_flash_t *f) {
     float falloff=fmaxf(0.0f,1.0f-sqrtf(dx*dx+dy*dy+dz*dz)/f->position[3]);
     if(falloff<=0) return 0;
     if(f->direction[3]>0) {
@@ -66,27 +65,41 @@ static inline float doom_flash_at(float x,float y,float z,const doom_flash_t *f,
         float cone=fminf(1,fmaxf(0,(cosine-f->direction[3])/(0.985f-f->direction[3])));
         falloff*=cone*cone*(3-2*cone);
     }
-    /* A glowing panel's span (flashAt in lighting.glsl): the heights s on it
-     * whose rays pass every opening narrow to [low,high]. */
-    float extent=f->direction[3]>0?0:f->direction[0],low=-extent,high=extent;
-    for(uint32_t i=f->first;i<f->first+f->count;++i) {
-        const doom_light_blocker_t *b=&blockers[i];
-        float ex=b->line[2]-b->line[0],ey=b->line[3]-b->line[1];
-        float ox=b->line[0]-f->position[0],oy=b->line[1]-f->position[1];
-        float det=doom_flash_cross(dx,dy,ex,ey);
-        if(fabsf(det)<0.0001f) continue;
-        float t=doom_flash_cross(ox,oy,ex,ey)/det,u=doom_flash_cross(ox,oy,dx,dy)/det;
-        if(t>0.001f&&t<0.999f&&u>=0&&u<=1) {
-            float hit=f->position[2]+dz*t,lever=1-t;
-            float bottom=b->opening[0]+0.02f,top=b->opening[1]-0.02f;
-            if(bottom>=top) return 0;
-            float below=(bottom-hit)/lever,above=(top-hit)/lever;
-            if(below>=high||above<=low) return 0;
-            low=fmaxf(low,below);high=fminf(high,above);
-        }
+    return falloff;
+}
+/* One blocker against the ray toward (dx, dy, dz): 0 when it stops the ray.
+ * A glowing panel's span (flashAt in lighting.glsl): the heights s on it
+ * whose rays pass every opening narrow to [low,high]. */
+static inline int doom_flash_passes(const doom_flash_t *f,const doom_light_blocker_t *b,float dx,float dy,float dz,float *low,float *high) {
+    float ex=b->line[2]-b->line[0],ey=b->line[3]-b->line[1];
+    float ox=b->line[0]-f->position[0],oy=b->line[1]-f->position[1];
+    float det=doom_flash_cross(dx,dy,ex,ey);
+    if(fabsf(det)<0.0001f) return 1;
+    float t=doom_flash_cross(ox,oy,ex,ey)/det,u=doom_flash_cross(ox,oy,dx,dy)/det;
+    if(t>0.001f&&t<0.999f&&u>=0&&u<=1) {
+        float hit=f->position[2]+dz*t,lever=1-t;
+        float bottom=b->opening[0]+0.02f,top=b->opening[1]-0.02f;
+        if(bottom>=top) return 0;
+        float below=(bottom-hit)/lever,above=(top-hit)/lever;
+        if(below>=*high||above<=*low) return 0;
+        *low=fmaxf(*low,below);*high=fminf(*high,above);
     }
+    return 1;
+}
+static inline float doom_flash_extent(const doom_flash_t *f) {return f->direction[3]>0?0:f->direction[0];}
+static inline float doom_flash_amount(const doom_flash_t *f,float falloff,float extent,float low,float high) {
     float visible=extent>0?(high-low)/(2*extent):1;
     return f->strength*falloff*falloff*(3.0f-2.0f*falloff)*visible;
+}
+static inline float doom_flash_at(float x,float y,float z,const doom_flash_t *f,
+                                const doom_light_blocker_t *blockers) {
+    float dx=x-f->position[0],dy=y-f->position[1],dz=z-f->position[2];
+    float falloff=doom_flash_reach(dx,dy,dz,f);
+    if(falloff<=0) return 0;
+    float extent=doom_flash_extent(f),low=-extent,high=extent;
+    for(uint32_t i=f->first;i<f->first+f->count;++i)
+        if(!doom_flash_passes(f,&blockers[i],dx,dy,dz,&low,&high)) return 0;
+    return doom_flash_amount(f,falloff,extent,low,high);
 }
 /* Exact blocker culling; dropping a line never changes doom_flash_at. Lines
  * beyond the radius cannot be crossed, nor can openings spanning every reachable
@@ -115,10 +128,11 @@ static inline float doom_flash_segment_distance(float x,float y,const doom_light
     float t=length2>0?fminf(1.0f,fmaxf(0.0f,(px*ex+py*ey)/length2)):0;
     return sqrtf((px-ex*t)*(px-ex*t)+(py-ey*t)*(py-ey*t));
 }
-static inline uint32_t doom_flash_cull_hidden(const doom_flash_t *f,doom_light_blocker_t *blockers,uint32_t count) {
+/* Per angular bin (bin k starts at azimuth -pi+k*2pi/DOOM_FLASH_BINS), how
+ * far every ray in it reaches at most before a wall that stops all rays. */
+static inline void doom_flash_depths(const doom_flash_t *f,const doom_light_blocker_t *blockers,uint32_t count,float depth[DOOM_FLASH_BINS]) {
     const float pi=3.14159265f,width=2*pi/DOOM_FLASH_BINS;
     float x=f->position[0],y=f->position[1],z=f->position[2],r=f->position[3];
-    float depth[DOOM_FLASH_BINS];
     for(int k=0;k<DOOM_FLASH_BINS;++k) depth[k]=1e30f;
     if(f->direction[3]>0) {
         /* Azimuths a cone of half-angle a around an axis at elevation e
@@ -153,21 +167,96 @@ static inline uint32_t doom_flash_cull_hidden(const doom_flash_t *f,doom_light_b
             depth[bin]=fminf(depth[bin],far);
         }
     }
+}
+/* A blocker's bins, one either side as margin: [*first,*last], possibly past
+ * DOOM_FLASH_BINS (wrap with doom_flash_bin). False for lines at the light,
+ * which span too wide an angle to bin and stay in every list. */
+static inline int doom_flash_bins_of(const doom_flash_t *f,const doom_light_blocker_t *b,float nearest,int *first,int *last) {
+    const float pi=3.14159265f,width=2*pi/DOOM_FLASH_BINS;
+    float x=f->position[0],y=f->position[1];
+    if(nearest<1) return 0;
+    float a0=atan2f(b->line[1]-y,b->line[0]-x),d=remainderf(atan2f(b->line[3]-y,b->line[2]-x)-a0,2*pi);
+    float start=fmodf((d>=0?a0:a0+d)+3*pi,2*pi);
+    *first=(int)floorf(start/width)-1;*last=(int)floorf((start+fabsf(d))/width)+1;
+    return 1;
+}
+static inline int doom_flash_bin(int k) {return (k%DOOM_FLASH_BINS+DOOM_FLASH_BINS)%DOOM_FLASH_BINS;}
+static inline uint32_t doom_flash_cull_hidden(const doom_flash_t *f,doom_light_blocker_t *blockers,uint32_t count) {
+    float x=f->position[0],y=f->position[1];
+    float depth[DOOM_FLASH_BINS];
+    doom_flash_depths(f,blockers,count,depth);
     uint32_t kept=0;
     for(uint32_t i=0;i<count;++i) {
         const doom_light_blocker_t *b=&blockers[i];
         float nearest=doom_flash_segment_distance(x,y,b);
-        int hidden=nearest>=1;
-        if(hidden) {
-            float a0=atan2f(b->line[1]-y,b->line[0]-x),d=remainderf(atan2f(b->line[3]-y,b->line[2]-x)-a0,2*pi);
-            float start=fmodf((d>=0?a0:a0+d)+3*pi,2*pi);
-            int first=(int)floorf(start/width)-1,last=(int)floorf((start+fabsf(d))/width)+1;
-            for(int k=first;k<=last&&hidden;++k)
-                hidden=depth[(k%DOOM_FLASH_BINS+DOOM_FLASH_BINS)%DOOM_FLASH_BINS]<nearest-0.25f;
-        }
+        int first,last,hidden=doom_flash_bins_of(f,b,nearest,&first,&last);
+        for(int k=first;hidden&&k<=last;++k) hidden=depth[doom_flash_bin(k)]<nearest-0.25f;
         if(!hidden) blockers[kept++]=*b;
     }
     return kept;
+}
+/* Directional lists for the GPU (flashAt in lighting.glsl): every pixel
+ * would otherwise test all of a light's blockers. Each of DOOM_FLASH_SLICES
+ * azimuth slices lists the blockers a ray in it can meet before a wall that
+ * stops every ray there; a ray meets no line outside its azimuth, so
+ * doom_flash_at_sliced equals doom_flash_at. Slices reach one bin past
+ * their edges, so a pixel's azimuth may be off by that much. table[s] packs
+ * the slice's first index << 16 | count; indices are into the light's own
+ * blockers. Returns how many indices were written, or UINT32_MAX when they
+ * would not fit in capacity (at most 65535). */
+#define DOOM_FLASH_SLICES 256
+static inline uint32_t doom_flash_slice(float dx,float dy) {
+    const float pi=3.14159265f;
+    int s=(int)((atan2f(dy,dx)+pi)*(DOOM_FLASH_SLICES/(2*pi)));
+    return (uint32_t)(s<0?0:s>=DOOM_FLASH_SLICES?DOOM_FLASH_SLICES-1:s);
+}
+static inline uint32_t doom_flash_slice_blockers(const doom_flash_t *f,const doom_light_blocker_t *blockers,uint32_t count,
+                                                 uint32_t table[DOOM_FLASH_SLICES],uint16_t *indices,uint32_t capacity) {
+    const int per=DOOM_FLASH_BINS/DOOM_FLASH_SLICES;
+    float depth[DOOM_FLASH_BINS];
+    uint32_t sizes[DOOM_FLASH_SLICES]={0},stamp[DOOM_FLASH_SLICES]={0},total=0;
+    if(count>65535||capacity>65535) return UINT32_MAX;
+    doom_flash_depths(f,blockers,count,depth);
+    /* Pass 0 counts each slice's blockers, pass 1 lists them. */
+    for(int pass=0;pass<2;++pass) {
+        if(pass) {
+            for(int s=0;s<DOOM_FLASH_SLICES;++s) {table[s]=total<<16;total+=sizes[s];stamp[s]=0;}
+            if(total>capacity) return UINT32_MAX;
+        }
+        for(uint32_t i=0;i<count;++i) {
+            const doom_light_blocker_t *b=&blockers[i];
+            float nearest=doom_flash_segment_distance(f->position[0],f->position[1],b);
+            int first,last,binned=doom_flash_bins_of(f,b,nearest,&first,&last);
+            if(!binned) {first=0;last=DOOM_FLASH_BINS-1;}
+            for(int k=first;k<=last;++k) {
+                if(binned&&depth[doom_flash_bin(k)]<nearest-0.25f) continue;
+                /* Visible in bin k: listed where k or a neighbor lies. */
+                for(int n=-1;n<=1;++n) {
+                    int s=doom_flash_bin(k+n)/per;
+                    if(stamp[s]==i+1) continue;
+                    stamp[s]=i+1;
+                    if(!pass) {++sizes[s];continue;}
+                    indices[(table[s]>>16)+(table[s]&0xffff)]=(uint16_t)i;
+                    ++table[s];
+                }
+            }
+        }
+    }
+    return total;
+}
+static inline float doom_flash_at_sliced(float x,float y,float z,const doom_flash_t *f,const doom_light_blocker_t *blockers,
+                                         const uint32_t table[DOOM_FLASH_SLICES],const uint16_t *indices) {
+    float dx=x-f->position[0],dy=y-f->position[1],dz=z-f->position[2];
+    float falloff=doom_flash_reach(dx,dy,dz,f);
+    if(falloff<=0) return 0;
+    float extent=doom_flash_extent(f),low=-extent,high=extent;
+    /* Straight above or below the light no line is crossed (det is 0). */
+    if(dx!=0||dy!=0) {
+        uint32_t entry=table[doom_flash_slice(dx,dy)];
+        for(uint32_t n=entry>>16;n<(entry>>16)+(entry&0xffff);++n)
+            if(!doom_flash_passes(f,&blockers[indices[n]],dx,dy,dz,&low,&high)) return 0;
+    }
+    return doom_flash_amount(f,falloff,extent,low,high);
 }
 /* Keep equivalent to flashFacing in platform/shaders/lighting.glsl. The unit normal faces
  * the viewer; color[3] blends from omnidirectional (0) to Lambert (1). */

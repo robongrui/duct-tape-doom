@@ -212,6 +212,26 @@ environments without a display. For address checks use `-fsanitize=address`
 for C, C++ and Objective-C++ and the executable linker; the combined UBSan
 preset is for the data-free checks.
 
+To find slow places in a WAD, `doom-perf-smoke` loads every map and looks
+in four directions from spots across it, with the world paused:
+
+```sh
+cd build/play && ./doom-perf-smoke /path/to/doom2.wad
+./doom-perf-smoke /path/to/doom2.wad -maps MAP15,MAP29 -spacing 256 -width 1920 -height 1080
+```
+
+Each frame waits for the GPU, so CPU and GPU times are measured separately.
+The slowest views are timed again over several frames. At the slowest one the
+renderer leaves out one kind of work at a time (each kind of dynamic light,
+reflections, bloom, fog, mist) to show what the time goes to. `perf-report/`
+gets `report.txt` (per map: lights at the slowest view with their wall
+blockers, the cost of each kind of work, pitfalls such as lights that test
+many walls per pixel), `views.csv` (every view) and a screenshot per map.
+It reads the player's own `graphics.cfg` unless `-graphics` names another;
+`-file`, `-deh`, `-skill`, `-flashlight` and the window options pass through,
+`-budget ms` sets the frame budget (default 16.7) and `-strict` fails when a
+map exceeds it. Keep the window visible while it runs.
+
 For a bounded frame capture, the app accepts `-rendercheck /absolute/output.png`
 (it exits after capturing an actual level). Use `-graphics /absolute/file.cfg`
 to isolate graphics settings. These are development options, independent of
@@ -377,6 +397,7 @@ Targets:
 | `doom` | Optional playable SDL3 desktop app |
 | `doom-native-smoke` | Optional real-level movement, firing and save/load check |
 | `doom-gpu-smoke` | Optional 3D-renderer gameplay and level-transition check |
+| `doom-perf-smoke` | Optional per-map frame timing and slow-spot report for a WAD |
 | `doom-gpu-shaders` | Regenerates `platform/gpu_shaders.h` from `platform/shaders` |
 | `doom-headless` | Single-player demo playback without graphics/audio |
 | `doom-portability-tests` | Data-free portability regression checks |

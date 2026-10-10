@@ -64,18 +64,20 @@ extern "C" int DOOM_ChooseWads(const char *bundled, char **base, char **addon)
             if (!names) { explain(error.localizedDescription); continue; }
             NSMutableArray<NSString *> *bases = [NSMutableArray array];
             NSMutableArray<NSString *> *addons = [NSMutableArray array];
-            BOOL invalid = NO;
+            BOOL invalid = NO, otherGame = NO;
             for (NSString *name in [names sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
                 if ([name.pathExtension caseInsensitiveCompare:@"wad"] != NSOrderedSame) continue;
                 NSString *path = [folder stringByAppendingPathComponent:name];
                 doom_wad_info info;
                 if (!DOOM_ProbeWad(path.fileSystemRepresentation, &info)) { invalid = YES; continue; }
-                if (info.is_iwad && (info.episode_maps || info.numbered_maps)) [bases addObject:path];
+                if (info.is_iwad && !info.has_palette) otherGame = YES;
+                else if (info.is_iwad && (info.episode_maps || info.numbered_maps)) [bases addObject:path];
                 else if (!info.is_iwad) [addons addObject:path];
             }
             if (!bases.count && !addons.count) {
-                explain(invalid ? @"The WAD files in this folder are damaged or unsupported. Choose a folder with valid DOOM WAD files."
-                                : @"No WAD files were found. Choose the folder that directly contains your .wad files.");
+                explain(otherGame ? @"This folder holds a game WAD in another format, such as DOOM 64. Only DOOM, DOOM II, Final DOOM and Freedoom game WADs can be played."
+                        : invalid ? @"The WAD files in this folder are damaged or unsupported. Choose a folder with valid DOOM WAD files."
+                        : @"No WAD files were found. Choose the folder that directly contains your .wad files.");
                 continue;
             }
             NSString *game = bases.count ? choose(bases, @"Choose the base game", NO) : (hasBundled ? @(bundled) : nil);

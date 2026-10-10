@@ -1349,6 +1349,48 @@ G_DeferedInitNew
 } 
 
 
+static boolean G_MapExists (int episode, int map)
+{
+    char	name[9];
+
+    if (gamemode == commercial)
+	sprintf (name, "MAP%02d", map);
+    else
+	sprintf (name, "E%dM%d", episode, map);
+    return W_CheckNumForName (name) >= 0;
+}
+
+boolean G_StepMap (int step, int* episode, int* map)
+{
+    int		e = *episode;
+    int		m = *map;
+    int		tries;
+
+    for (tries = 0; tries < 40; tries++)
+    {
+	m += step;
+	if (gamemode == commercial)
+	{
+	    if (m < 1) m = 32;
+	    else if (m > 32) m = 1;
+	}
+	else
+	{
+	    if (m < 1) { m = 9; e--; }
+	    else if (m > 9) { m = 1; e++; }
+	    if (e < 1) e = 4;
+	    else if (e > 4) e = 1;
+	}
+	if (G_MapExists (e, m))
+	{
+	    *episode = e;
+	    *map = m;
+	    return true;
+	}
+    }
+    return false;
+}
+
 void G_DoNewGame (void) 
 {
     demoplayback = false; 

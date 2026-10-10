@@ -12,6 +12,7 @@ extern "C" {
 #include "doomtype.h"
 }
 #include "flash_lighting.h"
+#include "i_render3d.h"
 
 struct SDL_Window;
 // Defined by the backend; the scene only holds and passes references.
@@ -65,7 +66,7 @@ struct Settings {
     int variedHighlights=1; // Gloss highlights tighten on smooth artwork and spread on busy artwork, per palette ramp.
     int softLight=1; // Light seam blending and edge contact shading.
     int reflections=1; // Mirrored scene on water, nukage, slime and blood.
-    int retroReflections=1; // Quarter resolution, palette colors, stepped wobble.
+    int retroReflections=1; // Eighth resolution, palette colors, stepped wobble.
     int spriteFilter=0; // 0: crisp, 1: bilinear, 2: xBR pixel-art reconstruction.
     int sun=1; // Sun shadows baked at level load from the sky texture.
     int bakedLights=1; // Static lights baked at level load; nearby dynamic copies add flicker and detail.
@@ -100,6 +101,7 @@ struct Settings {
     int sunShafts=1; // Soft sunbeams slanting down through ceiling holes and windows, with the dust motes in them.
     int sunScatter=1; // Sunbeams glow brighter seen toward the sun and fainter from behind it.
     int glossyScreens=1; // Monitor glass found in computer textures bulges, refracts the screen behind it and catches light.
+    int weaponLighting=1; // The weapon's painted sheen and light come out at load; lights around the player relight it.
     // Detail textures: 0 off, 1 with smooth or sharp walls and floors, 2 always
     // (stepped grain on crisp pixels). Strength scales the grain's contrast,
     // scale is detail pixels per texture pixel, fade the distance it is gone by.
@@ -114,9 +116,17 @@ struct Settings {
 // on its screen (see screen_glass.h); null otherwise.
 struct Image { bool opaque=true; std::vector<byte> pixels; GpuTextureRef texture,glassFrame; int width=0,height=0,left=0,top=0; std::array<float,3> glow={1,1,1}; float glowWeight=0; std::array<float,3> emissionColor={}; float emissionWeight=0,emissionCoverage=0,emissionU=0,emissionV=0; std::array<float,3> average={}; bool averaged=false; int detail=-1; };
 
+// Frame profiling for the performance smoke test (I_Render3DProfile).
+struct Profile { bool enabled=false; unsigned skip=0; const char *screenshotPath=nullptr; I_Render3DFrameProfile frame={}; };
+extern Profile profile;
+
 extern Settings settings;
 extern SDL_Window *gameWindow;
 extern FlashSet flashes;
+// What the GPU gets: flashes with first/count into lightWords, the blockers
+// and their per-direction slices (buildLightWords in scene3d.cpp).
+extern FlashSet gpuFlashes;
+extern std::vector<std::array<uint32_t,4>> lightWords;
 extern FogLights fogLights;
 extern std::vector<LightBlocker> lightBlockers;
 /* Texture keys: wall index >=0, WAD lump = -1-lump. */

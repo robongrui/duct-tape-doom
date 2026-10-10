@@ -82,5 +82,8 @@ void main() {
         color.rgb=mix(color.rgb,max(color.rgb,c.sun.rgb),saturate(disc*c.fx2.w))+c.sun.rgb*amount*(1.0-disc*0.5);
     }
     vec4 fog=fogAlong(c.eye.xyz+ray*2000.0);
-    color.rgb=(color.rgb*fog.a+fog.rgb)*c.fx.x;outColor=color;
+    color.rgb=(color.rgb*fog.a+fog.rgb)*c.fx.x;
+    // Mirror pass (world.frag): the sky is far, but stays a faint reflection.
+    if(c.water.z==0.0&&c.water.w>0.0) color.a=0.35;
+    outColor=color;
 }

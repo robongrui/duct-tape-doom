@@ -29,6 +29,7 @@ int DOOM_ProbeWad(const char *path, doom_wad_info *info)
         if (fread(entry, 1, 16, file) != 16 ||
             (uint64_t)little32(entry) + little32(entry + 4) > (uint64_t)length) goto done;
         const unsigned char *name = entry + 8;
+        if (!memcmp(name, "PLAYPAL\0", 8)) info->has_palette = 1;
         if (name[0] == 'E' && name[1] >= '1' && name[1] <= '9' &&
             name[2] == 'M' && name[3] >= '1' && name[3] <= '9' && !name[4])
         {

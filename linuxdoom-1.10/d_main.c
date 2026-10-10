@@ -95,6 +95,10 @@ char*		wadfiles[MAXWADFILES];
 
 boolean		devparm;	// started game with -devparm
 boolean         nomonsters;	// checkparm of -nomonsters
+boolean         debugfly;
+boolean         debugnoclip;
+boolean         debuggod;
+boolean         debugnomonsters;
 boolean         respawnparm;	// checkparm of -respawn
 boolean         fastparm;	// checkparm of -fast
 boolean         classicmovement; // original player acceleration and friction
@@ -575,7 +579,7 @@ static void IdentifyIWAD(char *path)
                     | (uint32_t)header[10] << 16 | (uint32_t)header[11] << 24;
     if (!count || count > 100000 || offset > INT32_MAX || fseek(file, (long)offset, SEEK_SET))
         I_Error("Invalid IWAD directory: %s", path);
-    boolean episode1 = false, episode2 = false, episode4 = false, map01 = false;
+    boolean episode1 = false, episode2 = false, episode4 = false, map01 = false, palette = false;
     for (uint32_t i = 0; i < count; ++i)
     {
         if (fread(entry, 1, sizeof(entry), file) != sizeof(entry))
@@ -584,8 +588,11 @@ static void IdentifyIWAD(char *path)
         if (!memcmp(entry + 8, "E2M1\0\0\0\0", 8)) episode2 = true;
         if (!memcmp(entry + 8, "E4M1\0\0\0\0", 8)) episode4 = true;
         if (!memcmp(entry + 8, "MAP01\0\0\0", 8)) map01 = true;
+        if (!memcmp(entry + 8, "PLAYPAL\0", 8)) palette = true;
     }
     fclose(file);
+    if (!palette)
+        I_Error("Not a DOOM or DOOM II game WAD (DOOM 64 and other games use another format): %s", path);
     if (!episode1 && !map01) I_Error("IWAD contains no supported levels: %s", path);
     gamemode = map01 ? commercial : episode4 ? retail : episode2 ? registered : shareware;
     gamemission = map01 ? doom2 : doom;

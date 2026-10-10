@@ -31,6 +31,7 @@ extern "C" {
 extern int viewwindowx, viewwindowy;
 extern boolean menuactive, automapactive, paused;
 extern int numflats;
+extern float tourpitch;
 int P_PicAnimationNext(boolean istexture,int pic,int *next);
 }
 #include <SDL3/SDL.h>
@@ -41,8 +42,10 @@ int P_PicAnimationNext(boolean istexture,int pic,int *next);
 #include "detail_texture.h"
 #include "surface_lighting.h"
 #include "baked_lighting.h"
+#include "weapon_lighting.h"
 
 namespace doom3d {
+Profile profile;
 Settings settings;
 SDL_Window *gameWindow;
 FlashSet flashes;
@@ -64,6 +67,13 @@ std::array<const mobj_t*,maxLights> lightSources={};
 // Lights kept only for the fog glow (bake-only static lights): no surface,
 // sprite or shadow uses them.
 std::array<bool,maxLights> fogOnly={};
+// For profiling: each light's I_RENDER3D_LIGHT_* kind, set by its collector.
+std::array<uint8_t,maxLights> lightKinds={};
+uint8_t lightKind=0;
+// Adds the time since start to total while profiling.
+uint64_t profileStart() {return profile.enabled?SDL_GetTicksNS():0;}
+void profileAdd(double &total,uint64_t start) {if(profile.enabled)total+=(SDL_GetTicksNS()-start)/1e6;}
+struct ProfileTimer { double &total; uint64_t start=profileStart(); ~ProfileTimer() {profileAdd(total,start);} };
 std::vector<FlashPulse> flashPulses;
 unsigned flashLevelSerial;
 std::unordered_map<unsigned,std::array<float,3>> glowColors;
@@ -111,6 +121,11 @@ std::vector<int> skyOpeningOf;std::vector<SkyOpening> skyOpenings;
 // the sun for length units, until the ray leaves the building.
 struct SunShaft { float x,y,z,length,strength; int sector; };
 std::vector<SunShaft> sunShafts;
+// Sectors whose air sunbeams and sunlit dust show in (bakeShafts): under a
+// ceiling, or in a sky opening that is enclosed and at most 400x400 units in
+// area, a ceiling hole or a walled pocket the light drops into. A courtyard
+// or open ground, however walled in, is plain daylight with no beams in it.
+std::vector<char> beamAir;
 // Walls: one strip per linedef side (index line*2+side) in an RGBA8 atlas
 // (rgb baked light at half scale, a sun), columns along the side from its
 // first drawn vertex at a, rows up from low to the highest ceiling its
@@ -427,6 +442,27 @@ Image &lumpImage(int lump,bool flat) {
     if(W_LumpLength(paletteLump)<768) I_Error((char*)"Invalid lighting palette");
     const byte *palette=(const byte*)W_CacheLumpNum(paletteLump,PU_CACHE);
     image.glowWeight=doom_sprite_glow(pixels.data(),(size_t)w*h,palette,image.glow.data());
+    return images.emplace(key,std::move(image)).first->second;
+}
+// Weapon frames to relight (weapon_lighting.h), keyed below the WAD lumps:
+// the de-lit artwork with its normals in B/A, two transparent columns, then
+// its gloss in R.
+Image &weaponImage(int lump) {
+    int key=INT_MIN/2-lump; auto found=images.find(key); if(found!=images.end()) return found->second;
+    const Image &source=lumpImage(lump,false);
+    int w=source.width,h=source.height,stride=2*w+2;
+    const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
+    auto maps=doom_weapon_delight(w,h,source.pixels.data(),palette);
+    std::vector<byte> packed((size_t)stride*h*4,0);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        size_t i=(size_t)y*w+x;byte *art=&packed[((size_t)y*stride+x)*4];
+        art[0]=maps.pixels[2*i];art[1]=maps.pixels[2*i+1];art[2]=maps.normals[2*i];art[3]=maps.normals[2*i+1];
+        packed[((size_t)y*stride+w+2+x)*4]=maps.gloss[i];
+    }
+    Image image;image.pixels=std::move(maps.pixels);image.opaque=false;
+    image.width=w;image.height=h;image.left=source.left;image.top=source.top;
+    image.texture=gpuCreateTexture(GpuFormat::RGBA8,stride,h,packed.data(),stride*4);
+    if(!image.texture) I_Error((char*)"Could not allocate a GPU texture");
     return images.emplace(key,std::move(image)).first->second;
 }
 std::vector<Point> clip(const std::vector<Point> &poly,Point origin,Point direction,bool right) {
@@ -822,7 +858,7 @@ void buildMap() {
     buildCaustics();
     buildShore();
     sunBaked=false;lightBakeKey=-1;bounceKey=-1;ambientKey=-1;flowKey=-1;bakeThingsKey=-1;wallBakeTexture=nullptr;flatLightTexture=nullptr;
-    skyOpeningOf.clear();skyOpenings.clear();sunShafts.clear();
+    skyOpeningOf.clear();skyOpenings.clear();sunShafts.clear();beamAir.clear();
     bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();
     wallDirectionCells.clear();flatDirectionCells.clear();wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;
     layoutBake();relightPending.clear();
@@ -959,6 +995,7 @@ void uploadFlatLight() {
 float enclosure(const sector_t *sector,float *light=nullptr);
 float hashUnit(int x,int y,uint32_t seed);
 void bakeShafts();
+void findSkyOpenings();
 // A floor cell's sun visibility (0-255), or -1 for void and sky floors.
 int sunCell(const BakeMap &map,size_t i,const float direction[3]) {
     int sector=seamCells[i].own;
@@ -1037,15 +1074,57 @@ void bakeSun() {
     fprintf(stderr,"3D sun: yaw %.0f degrees, %zu sunlit cells, %zu sunbeams, %zu wall strips in %dx%d, baked in %.0f ms.\n",
         yaw*180/doomPi,lit.load(),sunShafts.size(),bakeOrder.size(),atlasWidth,atlasHeight,(SDL_GetTicksNS()-start)/1e6);
 }
-// Sunbeams: about one per 24 units of sunlit indoor floor (sky holes count as
-// indoors when enclosed), jittered within its block so the beams never line
-// up in rows. Each runs from the floor back toward the sun, sampled on the
-// map grid, while it stays in indoor air; it ends a little past the point
-// where it leaves through a sky ceiling or a window into open sky.
+// Sunbeams: about one per 24 units of sunlit floor in beam air (beamAir),
+// jittered within its block so the beams never line up in rows. Each runs
+// from the floor back toward the sun, sampled on the map grid, while it stays
+// in beam air; it ends a little past the point where it leaves through a sky
+// ceiling or a window into open sky.
+// Beams belong to dusty air lit through a narrow gap, so a beam fades where
+// the light floods in instead: where the opening onto open ground it leaves
+// through (a window, or the edge of a cave mouth or overhang) is wider than
+// 128 units, gone at 320.
 void bakeShafts() {
     sunShafts.clear();
-    std::vector<char> indoor(numsectors);
-    for(int i=0;i<numsectors;++i)indoor[i]=sectors[i].ceilingpic!=skyflatnum||enclosure(&sectors[i])>0.5f;
+    if(skyOpeningOf.size()!=(size_t)numsectors)findSkyOpenings();
+    std::vector<double> openingArea(skyOpenings.size());
+    for(size_t i=0;i<seamCells.size();++i) {
+        int at=seamCells[i].own;
+        if(at!=noSector&&skyOpeningOf[at]>=0)openingArea[skyOpeningOf[at]]+=mapCell*mapCell;
+    }
+    std::vector<char> &indoor=beamAir;
+    indoor.assign(numsectors,0);
+    for(int i=0;i<numsectors;++i)
+        indoor[i]=sectors[i].ceilingpic!=skyflatnum||(enclosure(&sectors[i])>0.5f&&openingArea[skyOpeningOf[i]]<=400*400);
+    // Openings onto open ground: lines with beam air on one side and open sky
+    // on the other, through a gap at least 24 high, joined into chains where
+    // they share a vertex. A chain's length is how wide the opening is.
+    auto opensOut=[&](const line_t &line) {
+        if(!line.frontsector||!line.backsector)return false;
+        int f=(int)(line.frontsector-sectors),k=(int)(line.backsector-sectors);
+        if(indoor[f]==indoor[k]||!bakeMap.sectors[indoor[f]?k:f].sky)return false;
+        return std::min(bakeMap.sectors[f].ceiling,bakeMap.sectors[k].ceiling)-std::max(bakeMap.sectors[f].floor,bakeMap.sectors[k].floor)>=24;
+    };
+    std::vector<int> root(numvertexes);
+    for(int v=0;v<numvertexes;++v)root[v]=v;
+    auto chainOf=[&](int v) {while(root[v]!=v)v=root[v]=root[root[v]];return v;};
+    for(int i=0;i<numlines;++i)if(opensOut(lines[i]))root[chainOf((int)(lines[i].v1-vertexes))]=chainOf((int)(lines[i].v2-vertexes));
+    std::vector<float> chainLength(numvertexes);
+    for(int i=0;i<numlines;++i)if(opensOut(lines[i]))chainLength[chainOf((int)(lines[i].v1-vertexes))]+=std::hypot(units(lines[i].dx),units(lines[i].dy));
+    // The width of the opening a beam leaves through from sector last into
+    // open sector out near (x,y): the chain of the nearest line between them.
+    auto openingWidth=[&](int last,int out,float x,float y) {
+        float best=INFINITY,width=0;
+        const sector_t &from=sectors[last];
+        for(int i=0;i<from.linecount;++i) {
+            const line_t &line=*from.lines[i];
+            if(!opensOut(line)||(line.frontsector-sectors!=out&&line.backsector-sectors!=out))continue;
+            float ax=units(line.v1->x),ay=units(line.v1->y),dx=units(line.dx),dy=units(line.dy);
+            float u=std::clamp(((x-ax)*dx+(y-ay)*dy)/std::max(dx*dx+dy*dy,1e-6f),0.0f,1.0f);
+            float distance=std::hypot(ax+dx*u-x,ay+dy*u-y);
+            if(distance<best) {best=distance;width=chainLength[chainOf((int)(line.v1-vertexes))];}
+        }
+        return width;
+    };
     int block=std::max(1,(int)std::lround(24/mapCell));
     for(int by=0;by<mapHeight;by+=block)for(int bx=0;bx<mapWidth;bx+=block) {
         int x=std::min(mapWidth-1,bx+(int)(hashUnit(bx,by,0x5a17u)*block)),y=std::min(mapHeight-1,by+(int)(hashUnit(bx,by,0x5a18u)*block));
@@ -1054,17 +1133,24 @@ void bakeShafts() {
         float visible=contactCells[4*i+2]/255.0f;
         if(visible<0.5f)continue;
         float px=mapOrigin[0]+(x+0.5f)*mapCell,py=mapOrigin[1]+(y+0.5f)*mapCell,pz=bakeMap.sectors[sector].floor;
-        float length=0;bool left=false;
+        float length=0,width=0;bool left=false;int last=sector;
         for(float t=4;t<1024;t+=4) {
             float qx=px+sunDirection[0]*t,qy=py+sunDirection[1]*t,qz=pz+sunDirection[2]*t;
             int cx=(int)std::floor((qx-mapOrigin[0])/mapCell),cy=(int)std::floor((qy-mapOrigin[1])/mapCell);
             if(cx<0||cy<0||cx>=mapWidth||cy>=mapHeight)break;
             int at=seamCells[(size_t)cy*mapWidth+cx].own;
             if(at==noSector||qz<bakeMap.sectors[at].floor)break;
-            if(!indoor[at]||qz>bakeMap.sectors[at].ceiling) {left=bakeMap.sectors[at].sky;break;}
-            length=t;
+            if(!indoor[at]||qz>bakeMap.sectors[at].ceiling) {
+                left=bakeMap.sectors[at].sky;
+                if(!indoor[at])width=openingWidth(last,at,qx,qy);
+                break;
+            }
+            length=t;last=at;
         }
-        if(left&&length>=24)sunShafts.push_back({px,py,pz,length+24,visible,sector});
+        if(!left||length<24)continue;
+        float wide=std::clamp((width-128)/192,0.0f,1.0f),contrast=1-wide*wide*(3-2*wide);
+        if(contrast<0.05f)continue;
+        sunShafts.push_back({px,py,pz,length+24,visible*contrast,sector});
     }
 }
 // Wall vertex coordinates in the bake atlas; -1 leaves the wall without one.
@@ -1208,7 +1294,8 @@ void muzzleFlash(mobj_t *source,int weapon,int projectile) {
 void appendLight(float x,float y,float z,float radius,float strength,const std::array<float,3> &color,const mobj_t *source,float directionality,bool occluded=true,float baked=0,
                  const std::array<float,4> &spot={}) {
     if(flashes.count>=maxLights) return;
-    lightSources[flashes.count]=source;fogOnly[flashes.count]=false;
+    ProfileTimer timer{profile.frame.lightsMs};
+    lightSources[flashes.count]=source;fogOnly[flashes.count]=false;lightKinds[flashes.count]=lightKind;
     Flash &f=flashes.lights[flashes.count++];
     f={{x,y,z,radius},strength,(unsigned)lightBlockers.size(),0,baked,{color[0],color[1],color[2],directionality},{spot[0],spot[1],spot[2],spot[3]}};
     if(!occluded) return;
@@ -1314,6 +1401,7 @@ StaticSample traceStatic(float x,float y,float z,int sector,const BakeMap &map=b
     }
     for(int g=1;g<flickerGroups;++g)if(groups[g]>0&&groups[g]>(sample.group?groups[sample.group]:0))sample.group=g;
     if(sample.group)sample.groupShare=groups[sample.group]/sample.amount;
+    fillHeadroom(sample.color.data(),lighting(&sectors[sector]));
     return sample;
 }
 // Grid lighting (settings.gridSpriteLight): a StaticSample every 32 units,
@@ -1434,7 +1522,7 @@ bool staticShadow(const StaticSample &sample,float z,ShadowLight &light) {
 struct StaticFog { float x,y,z,radius,strength;std::array<float,3> color; };
 std::vector<StaticFog> staticFog;
 void collectFlashes(float fraction,const Uniforms &camera) {
-    flashes={};lightBlockers.clear();fogOnly={};
+    flashes={};lightBlockers.clear();fogOnly={};lightKind=I_RENDER3D_LIGHT_FLASHLIGHT;
     // The flashlight is held low and right of the eye, like a lamp beside the
     // weapon, aimed to meet the view 256 units ahead. A light at the eye
     // would hide every shadow it casts behind its caster; from here walls,
@@ -1452,6 +1540,7 @@ void collectFlashes(float fraction,const Uniforms &camera) {
     flashPulses.erase(std::remove_if(flashPulses.begin(),flashPulses.end(),[](const FlashPulse &p) {
         return leveltime<p.tic||leveltime-p.tic>=6;
     }),flashPulses.end());
+    lightKind=I_RENDER3D_LIGHT_SHOT;
     for(const auto &p:flashPulses) {
         float strength=p.strength*doom_flash_fade(leveltime-p.tic,fraction);
         if(strength>0) appendLight(p.x,p.y,p.z,p.radius,strength,p.color,p.source,0.75f);
@@ -1484,13 +1573,14 @@ void collectFlashes(float fraction,const Uniforms &camera) {
     }
     for(auto it=burstBarrels.begin();it!=burstBarrels.end();) it=it->second?std::next(it):burstBarrels.erase(it);
     std::sort(barrels.begin(),barrels.end(),[](const Candidate &a,const Candidate &b) {return a.distance<b.distance;});
+    lightKind=I_RENDER3D_LIGHT_BARREL;
     for(size_t n=0;n<std::min(size_t(4),barrels.size());++n) {
         const mobj_t &thing=*barrels[n].thing;
         float x,y,z;interpolatedPosition(thing,fraction,x,y,z);
         appendLight(x,y,z+24,448,barrelLight(thing),frameGlow(thing.sprite,thing.frame),&thing,0.75f);
     }
     std::sort(decorations.begin(),decorations.end(),[](const Candidate &a,const Candidate &b) {return a.distance<b.distance;});
-    staticFog.clear();
+    staticFog.clear();lightKind=I_RENDER3D_LIGHT_DECORATION;
     for(size_t n=0;n<std::min(size_t(10),decorations.size());++n) {
         const mobj_t &thing=*decorations[n].thing;
         BakeLight light=decorationSource(thing);
@@ -1506,6 +1596,7 @@ void collectFlashes(float fraction,const Uniforms &camera) {
                     true,bakedLightsActive?1/flicker:0);
     }
     std::sort(projectiles.begin(),projectiles.end(),[](const Candidate &a,const Candidate &b) {return a.distance<b.distance;});
+    lightKind=I_RENDER3D_LIGHT_PROJECTILE;
     for(size_t n=0;n<std::min(size_t(8),projectiles.size());++n) {
         const mobj_t &thing=*projectiles[n].thing;
         float x,y,z;interpolatedPosition(thing,fraction,x,y,z);
@@ -1514,6 +1605,7 @@ void collectFlashes(float fraction,const Uniforms &camera) {
         else if(thing.type==MT_ROCKET) {radius=288;strength=1.5f;}
         appendLight(x,y,z+units(thing.height)*0.5f,radius,strength,frameGlow(thing.sprite,thing.frame),&thing,0.75f);
     }
+    lightKind=I_RENDER3D_LIGHT_DOOR;
     doorSpill(camera);
 }
 float flashAt(float x,float y,float z,const Flash &f) {
@@ -1576,6 +1668,7 @@ void collectSurfaceLights() {
     uint64_t now=SDL_GetTicksNS();
     float seconds=surfaceLightTime?(now-surfaceLightTime)/1e9f:1.0f/60;
     surfaceLightTime=now;
+    lightKind=bakeOnlyActive?I_RENDER3D_LIGHT_FOG:I_RENDER3D_LIGHT_SURFACE;
     if(bakeOnlyActive) {
         // The bake holds these lights; the nearest static lights stay as
         // fog-only lights so the glow around torches and pools remains.
@@ -2380,7 +2473,7 @@ void buildRings(Uniforms &camera) {
 
 // Dust motes: one speck in about half of the 48-unit cells around the eye,
 // world-anchored with a slow tic-stepped drift, shown only where the
-// flashlight beam or an indoor sunbeam catches it: a point is sunlit when the
+// flashlight beam or a sunbeam (in beamAir) catches it: a point is sunlit when the
 // floor point its sun ray leaves from is (the floor sun map; the sun stands
 // 40 degrees high). Each is one Doom pixel across at its distance.
 void buildDust(const Uniforms &camera) {
@@ -2411,7 +2504,7 @@ void buildDust(const Uniforms &camera) {
             float amount=flashAt(p[0],p[1],p[2],*beam)/beam->strength;
             bright+=amount;for(int c=0;c<3;++c)color[c]+=beam->color[c]*amount;
         }
-        if(sun&&(sector.ceilingpic!=skyflatnum||enclosure(&sector)>0.5f)) {
+        if(sun&&(size_t)own<beamAir.size()&&beamAir[own]) {
             float lift=(p[2]-floor)/0.8391f;
             int fx=std::clamp((int)std::floor((p[0]-sunAzimuth[0]*lift-mapOrigin[0])/mapCell),0,mapWidth-1);
             int fy=std::clamp((int)std::floor((p[1]-sunAzimuth[1]*lift-mapOrigin[1])/mapCell),0,mapHeight-1);
@@ -2614,6 +2707,7 @@ void gatherStatic(const BakeMap &map,int sector,float x,float y,float z,const fl
         // The pool's own surface (facing the way the pool glows).
         else if(inside&&normal[2]*(bakeAreas[n-points].ceiling?-1:1)>0.5f)sheen+=weight;
     }
+    fillHeadroom(sum,lighting(&sectors[sector]));
     for(int c=0;c<3;++c)out[c]=(uint8_t)std::min(255L,std::lround(std::round(sum[c]*32)/32*0.5f*255));
     if(direction)encodeDirection(normal,towards,total,groups,sheen,direction);
 }
@@ -3263,7 +3357,7 @@ void geometry(const Uniforms &camera,float fraction) {
     collectFlatLights();
     // The nearest reflective liquid below the eye sets this frame's mirror plane.
     reflectionActive=false;float nearest=1024;
-    if(settings.reflections&&camera.effects[2]==0)for(int i=0;i<numsectors;++i) {
+    if(settings.reflections&&!(profile.skip&I_RENDER3D_SKIP_REFLECTIONS)&&camera.effects[2]==0)for(int i=0;i<numsectors;++i) {
         if(!sectorMist[i].reflective||sectors[i].floorpic==skyflatnum)continue;
         float z=floorZ(&sectors[i]);if(camera.eye[2]<z+1)continue;
         for(int leaf:sectorFloors[i]) {
@@ -3363,6 +3457,7 @@ void geometry(const Uniforms &camera,float fraction) {
     struct Caster { const mobj_t *thing;const Image *image;int lump;bool flip;float x,y,z,distance; };
     std::vector<Caster> casters;
     const Flash *beam=settings.flashlightShadows&&flashlightOn&&camera.effects[2]==0&&flashes.count&&flashes.lights[0].direction[3]>0?&flashes.lights[0]:nullptr;
+    uint64_t spritesStart=profileStart();
     for(int i=0;i<numsectors;++i) for(mobj_t *thing=sectors[i].thinglist;thing;thing=thing->snext) {
         if(thing==players[displayplayer].mo||thing->sprite<0||thing->sprite>=numsprites) continue;
         const auto &sprite=sprites[thing->sprite]; int frame=thing->frame&FF_FRAMEMASK;
@@ -3443,6 +3538,7 @@ void geometry(const Uniforms &camera,float fraction) {
             if(soft)vertices[n].sunU=std::clamp(image.width*0.5f,8.0f,64.0f);
         }
     }
+    profileAdd(profile.frame.spritesMs,spritesStart);
     std::sort(casters.begin(),casters.end(),[](const Caster &a,const Caster &b){return a.distance<b.distance;});
     for(size_t n=0;n<std::min(size_t(6),casters.size());++n) {
         const Caster &c=casters[n];
@@ -3653,6 +3749,7 @@ void loadSettings() {
             if(!strcmp(key,"caustics_shots"))settings.causticsShots=v;
             if(!strcmp(key,"damp_shores"))settings.dampShores=v;
             if(!strcmp(key,"glossy_screens"))settings.glossyScreens=v;
+            if(!strcmp(key,"weapon_lighting"))settings.weaponLighting=v;
             if(!strcmp(key,"sun_shafts"))settings.sunShafts=v;
             if(!strcmp(key,"sun_disc"))settings.sunDisc=v;
             if(!strcmp(key,"sun_scatter"))settings.sunScatter=v;
@@ -3667,12 +3764,12 @@ void saveSettings() {
     FILE *file=fopen(graphicsConfig,"w"); if(!file)return;
     fprintf(file,"accelerated %d\nwidescreen %d\nfilter %d\ncrosshair %d\nlook %d\nretro %d\nfps %d\nscale %d\nfov %.1f\nsprite_filter %d\nemissive %d\nflashlight_tint %.2f\nfog %d\npalette %d\nsurface_detail %d\nsoft_light %d\nreflections %d\nretro_reflections %d\nsun_shadows %d\nbaked_lights %d\nbounce_light %d\ncaustics %d\n"
         "blood %d\nblood_shine %d\nflashlight_shadows %d\nsoft_effects %d\nheat_haze %d\neye_adaptation %d\nsplashes %d\ndust_motes %d\nplayer_shadow %d\ndoor_light %d\nmoving_relight %d\ntexel_lighting %d\n"
-        "sky_light %d\nbaked_occlusion %d\ndecoration_shadows %d\nlight_flow %d\nceiling_caustics %d\ncaustics_computed %d\ncaustics_grow %d\ncaustics_angle %d\ncaustics_sway %d\ncaustics_sprites %d\ncaustics_shots %d\ndamp_shores %d\nglossy_screens %d\nsun_shafts %d\nsun_disc %d\nsun_scatter %d\nvaried_highlights %d\n"
+        "sky_light %d\nbaked_occlusion %d\ndecoration_shadows %d\nlight_flow %d\nceiling_caustics %d\ncaustics_computed %d\ncaustics_grow %d\ncaustics_angle %d\ncaustics_sway %d\ncaustics_sprites %d\ncaustics_shots %d\ndamp_shores %d\nglossy_screens %d\nweapon_lighting %d\nsun_shafts %d\nsun_disc %d\nsun_scatter %d\nvaried_highlights %d\n"
         "bake_only_lights %d\ngrid_sprite_light %d\nunoccluded_surface_lights %d\ndetail_textures %d\ndetail_strength %.2f\ndetail_scale %.0f\ndetail_fade %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n",
         settings.accelerated,settings.widescreen,settings.filter,settings.crosshair,settings.look,settings.retro,settings.fps,settings.scale,settings.fov,settings.spriteFilter,settings.emissive,settings.flashlightTintGain,settings.fog,settings.palette,settings.detail,settings.softLight,settings.reflections,settings.retroReflections,settings.sun,settings.bakedLights,settings.bounce,settings.caustics,
         settings.blood,settings.bloodShine,settings.flashlightShadows,settings.softSprites,settings.heatHaze,settings.eyeAdaptation,settings.splashes,
         settings.dust,settings.playerShadow,settings.doorLight,settings.movingRelight,settings.texelLight,
-        settings.skyLight,settings.bakedAO,settings.thingShadows,settings.lightFlow,settings.ceilingCaustics,settings.causticsComputed,settings.causticsGrow,settings.causticsAngle,settings.causticsSway,settings.causticsSprites,settings.causticsShots,settings.dampShores,settings.glossyScreens,settings.sunShafts,settings.sunDisc,settings.sunScatter,settings.variedHighlights,
+        settings.skyLight,settings.bakedAO,settings.thingShadows,settings.lightFlow,settings.ceilingCaustics,settings.causticsComputed,settings.causticsGrow,settings.causticsAngle,settings.causticsSway,settings.causticsSprites,settings.causticsShots,settings.dampShores,settings.glossyScreens,settings.weaponLighting,settings.sunShafts,settings.sunDisc,settings.sunScatter,settings.variedHighlights,
         settings.bakeOnlyLights,settings.gridSpriteLight,settings.unoccludedSurfaceLights,settings.detailTextures,settings.detailStrength,settings.detailScale,settings.detailFade,settings.sharpSoftness,settings.paletteMips);
     fclose(file);
 }
@@ -3704,7 +3801,7 @@ void sceneShutdown() {
     bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();staticFog.clear();
     wallDirectionCells.clear();flatDirectionCells.clear();wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;bakeOnlyActive=false;
     wallBakeTexture=nullptr;flatLightTexture=nullptr;causticTexture=nullptr;causticPattern=nullptr;shoreTexture=nullptr;sunBaked=false;sunLevel=0;lightBakeKey=-1;bounceKey=-1;ambientKey=-1;flowKey=-1;bakeThingsKey=-1;skyLevel=0;bakedLightsActive=false;seamTexture=nullptr;contactTexture=nullptr;oldHeights.clear();wallDecals.clear();debris.clear();decalBatches.clear();particleVertices.clear();
-    sectorMist.clear();mistVertices.clear();skyVertices.clear();cloudTexture=nullptr;sunShafts.clear();shaftVertices.clear();skyOpeningOf.clear();skyOpenings.clear();
+    sectorMist.clear();mistVertices.clear();skyVertices.clear();cloudTexture=nullptr;sunShafts.clear();beamAir.clear();shaftVertices.clear();skyOpeningOf.clear();skyOpenings.clear();
     bloodFloors.clear();bloodWalls.clear();bloodPools.clear();pooledCorpses.clear();bloodShades.clear();bloodShadesLoaded=false;
     splashWatch.clear();rings.clear();heatVertices.clear();doorPortals.clear();relightPending.clear();steadyLights.clear();adaptedLight=-1;exposure=1;
 }
@@ -3757,8 +3854,74 @@ void screenQuad(std::vector<Vertex> &out,float x,float y,float w,float h,float u
     quad(out,{x,y,0,u0,v0,light,mode},{x+w,y,0,u1,v0,light,mode},
         {x+w,y-h,0,u1,v1,light,mode},{x,y-h,0,u0,v1,light,mode});
 }
+// Profiling: leaves out the light kinds named in profile.skip.
+void skipProfiledLights() {
+    unsigned kept=0;
+    for(unsigned i=0;i<flashes.count;++i) {
+        if(profile.skip&(1u<<lightKinds[i]))continue;
+        flashes.lights[kept]=flashes.lights[i];lightSources[kept]=lightSources[i];
+        fogOnly[kept]=fogOnly[i];lightKinds[kept]=lightKinds[i];++kept;
+    }
+    flashes.count=kept;
+}
+// The GPU's lights: each light's blockers in lightWords (two words each, the
+// floats' bits), then for lights with more than a few the slice table and
+// its 16-bit indices (doom_flash_slice_blockers), so a pixel only tests the
+// walls in its direction. first is the light's word offset, with the top bit
+// set when it has slices.
+FlashSet gpuFlashes;
+std::vector<std::array<uint32_t,4>> lightWords;
+std::array<float,maxLights> lightSliceCost={}; // Profiling: blockers a pixel tests on average.
+void buildLightWords() {
+    static std::vector<uint16_t> indices(65535);
+    gpuFlashes=flashes;lightWords.clear();
+    for(unsigned i=0;i<flashes.count;++i) {
+        const Flash &f=flashes.lights[i];Flash &g=gpuFlashes.lights[i];
+        const LightBlocker *own=lightBlockers.data()+f.first;
+        g.first=(uint32_t)lightWords.size();
+        for(uint32_t n=0;n<f.count;++n) {
+            std::array<uint32_t,4> line,opening;
+            memcpy(line.data(),own[n].line,sizeof(line));memcpy(opening.data(),own[n].opening,sizeof(opening));
+            lightWords.push_back(line);lightWords.push_back(opening);
+        }
+        lightSliceCost[i]=(float)f.count;
+        if(f.count<=4)continue; // A short list costs less than the lookup.
+        uint32_t table[DOOM_FLASH_SLICES];
+        uint32_t listed=doom_flash_slice_blockers(&f,own,f.count,table,indices.data(),(uint32_t)indices.size());
+        if(listed==UINT32_MAX)continue;
+        for(int n=0;n<DOOM_FLASH_SLICES;n+=4)lightWords.push_back({table[n],table[n+1],table[n+2],table[n+3]});
+        for(uint32_t n=0;n<listed;n+=8) {
+            std::array<uint32_t,4> word={};
+            for(uint32_t k=0;k<8&&n+k<listed;++k)word[k/2]|=(uint32_t)indices[n+k]<<(16*(k%2));
+            lightWords.push_back(word);
+        }
+        g.first|=0x80000000u;
+        lightSliceCost[i]=(float)listed/DOOM_FLASH_SLICES;
+    }
+    if(lightWords.empty())lightWords.push_back({});
+}
+// Profiling: this frame's lights, blockers and how many triangles they reach.
+void recordProfile() {
+    I_Render3DFrameProfile &frame=profile.frame;
+    frame.world=worldPending;frame.reflection=reflectionActive;frame.lights=(int)flashes.count;
+    for(unsigned i=0;i<flashes.count;++i) {
+        const Flash &f=flashes.lights[i];
+        const mobj_t *source=lightSources[i];
+        frame.light[i]={f.position[0],f.position[1],f.position[2],f.position[3],lightKinds[i],source?(int)source->type:-1,(int)f.count,0,lightSliceCost[i]};
+        frame.blockers+=(int)f.count;
+    }
+    for(const auto &batch:batches) for(size_t n=0;n+2<batch.second.size();n+=3) {
+        const unsigned *mask=batch.second[n].lightMask;
+        ++frame.triangles;
+        if(mask[0]|mask[1])++frame.litTriangles;
+        for(unsigned i=0;i<flashes.count;++i) if(mask[i/32]&(1u<<(i%32))) {++frame.light[i].triangles;++frame.lightTriangles;}
+    }
+}
 FrameView prepareFrame(int w,int h) {
     FrameView view={};Uniforms &camera=view.camera;
+    uint64_t prepareStart=profileStart();
+    static unsigned profileSerial;
+    if(profile.enabled) {profile.frame=I_Render3DFrameProfile{};profile.frame.serial=++profileSerial;pitch=0;}
     camera.projection[2]=1;camera.projection[3]=32768;
     camera.effects[0]=settings.filter;camera.effects[1]=settings.retro;
     camera.texFilter[0]=settings.sharpSoftness;camera.texFilter[1]=settings.paletteMips&&settings.filter;
@@ -3822,6 +3985,7 @@ FrameView prepareFrame(int w,int h) {
             }
         }
         float look=demoplayback?0:pitch;
+        tourpitch=look;
         camera.right[0]=sin(yaw);camera.right[1]=-cos(yaw);
         camera.forward[0]=cos(yaw)*cos(look);camera.forward[1]=sin(yaw)*cos(look);camera.forward[2]=sin(look);
         camera.up[0]=-cos(yaw)*sin(look);camera.up[1]=-sin(yaw)*sin(look);camera.up[2]=cos(look);
@@ -3835,7 +3999,10 @@ FrameView prepareFrame(int w,int h) {
             camera.texFilter[2]=at!=causticFrames.end()?float(at-causticFrames.begin()):0;
             camera.texFilter[3]=((leveltime-1)%causticSpeed+fraction)/causticSpeed;
         }
+        uint64_t geometryStart=profileStart();
         geometry(camera,fraction);
+        profileAdd(profile.frame.geometryMs,geometryStart);
+        if(profile.enabled)skipProfiledLights();
         // Surface lights come from this frame's geometry; the bake applies from the next frame.
         if(settings.bakedLights&&lightBakeKey!=lightBakeInputs())bakeLights();
         if(settings.bakedLights&&settings.gridSpriteLight&&lightBakeKey==lightBakeInputs()&&staticSerial!=lightBakeSerial)bakeStaticGrid();
@@ -3852,9 +4019,18 @@ FrameView prepareFrame(int w,int h) {
         updateExposure(camera);
         updateFlashlightTint(camera);
         selectFogLights(camera);
+        if(profile.skip&I_RENDER3D_SKIP_MIST) {mistVertices.clear();shaftVertices.clear();}
+        if(profile.skip&I_RENDER3D_SKIP_FOG) {fogLights={};camera.materials[2]=0;}
+        if(profile.skip&I_RENDER3D_SKIP_BLOOM) camera.materials[1]=0;
     }
     if(!worldPending) {mistVertices.clear();shaftVertices.clear();heatVertices.clear();skyVertices.clear();}
+    uint64_t masksStart=profileStart();
     assignLightMasks();
+    profileAdd(profile.frame.masksMs,masksStart);
+    uint64_t wordsStart=profileStart();
+    buildLightWords();
+    profileAdd(profile.frame.lightsMs,wordsStart);
+    if(profile.enabled) {recordProfile();profileAdd(profile.frame.prepareMs,prepareStart);}
     view.uiX=uiX;view.uiY=uiY;view.uiWidth=uiWidth;view.uiHeight=uiHeight;
     view.worldX=worldX;view.worldY=worldY;view.worldW=worldW;view.worldH=worldH;
     return view;
@@ -3879,20 +4055,48 @@ std::vector<SpriteDraw> weaponDraws(const Uniforms &camera) {
     for(int i=0;i<NUMPSPRITES;++i) {
         auto psp=player->psprites[i];if(!psp.state)continue;
         auto sf=sprites[psp.state->sprite].spriteframes[psp.state->frame&FF_FRAMEMASK];
-        Image &image=lumpImage(firstspritelump+sf.lump[0],false);
+        bool bright=psp.state->frame&FF_FULLBRIGHT;
+        // Mode 8 on the screen (1): the weapon relit per pixel from its own
+        // normals, its painted light taken out; 16: mirrored frame.
+        bool relit=settings.weaponLighting&&!bright;
+        int lump=firstspritelump+sf.lump[0];
+        Image &image=relit?weaponImage(lump):lumpImage(lump,false);
         float x=units(psp.sx)-image.left,y=viewwindowy+viewheight/2.0f-100+units(psp.sy)-image.top;
         std::vector<Vertex> weapon;
         float u0=sf.flip[0]?image.width:0,u1=sf.flip[0]?0:image.width;
         screenQuad(weapon,x/160-1,1-y/100,image.width/160.0f,image.height/100.0f,u0,0,u1,image.height,
-            (psp.state->frame&FF_FULLBRIGHT)?1.0f:sunLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,
+            bright?1.0f:sunLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,
                 flowLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,
-                seamLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,lighting(player->mo->subsector->sector)))),3);
+                seamLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,lighting(player->mo->subsector->sector)))),
+            relit?11u|(sf.flip[0]?16u:0u):3u);
         // The weapon takes a restrained, capped share of the light around the
         // eye so nearby lamps tint it without washing out the artwork.
-        if(!(psp.state->frame&FF_FULLBRIGHT)) {
-            auto baked=bakedLightAt(camera.eye[0],camera.eye[1],camera.eye[2],player->mo->subsector->sector);
+        if(!bright) {
+            StaticSample statics;
+            auto baked=bakedLightAt(camera.eye[0],camera.eye[1],camera.eye[2],player->mo->subsector->sector,&statics);
             for(float &c:baked)c=std::min(0.5f,c*0.4f);
             for(auto &vertex:weapon) {vertex.red=baked[0];vertex.green=baked[1];vertex.blue=baked[2];}
+            if(relit) {
+                // Lights that reach the weapon, which the shader places about
+                // ten units ahead of the eye; the flashlight only tints it.
+                // With bake-only lights the static light's direction comes
+                // packed as for sprites.
+                float low[3],high[3];unsigned mask[2]={},packedStatics=0;
+                for(int c=0;c<3;++c) {
+                    float at=camera.eye[c]+camera.forward[c]*10-camera.up[c]*5;
+                    low[c]=at-12;high[c]=at+12;
+                }
+                for(unsigned n=0;n<flashes.count;++n) {
+                    const auto &light=flashes.lights[n];
+                    if(!fogOnly[n]&&light.direction[3]<=0&&doom_flash_reaches_bounds(&light,low,high))mask[n/32]|=1u<<(n%32);
+                }
+                float towards=std::sqrt(statics.towards[0]*statics.towards[0]+statics.towards[1]*statics.towards[1]+statics.towards[2]*statics.towards[2]);
+                if(bakeOnlyActive&&statics.amount>0&&towards>1e-6f) {
+                    for(int c=0;c<3;++c)packedStatics|=(unsigned)std::lround((statics.towards[c]/towards*0.5f+0.5f)*255)<<(8*c);
+                    packedStatics|=(unsigned)std::lround(std::clamp(towards/statics.amount,0.0f,1.0f)*255)<<24;
+                }
+                for(auto &vertex:weapon) {std::copy(mask,mask+2,vertex.lightMask);vertex.statics=packedStatics;}
+            }
         }
         draws.push_back({&image,std::move(weapon)});
     }
@@ -3911,7 +4115,8 @@ void saveScreenshot(const void *bgra,int width,int height,int stride) {
     SDL_CreateDirectory("Screenshots");
     char path[256];snprintf(path,sizeof(path),"Screenshots/DOOM-%llu.png",(unsigned long long)SDL_GetTicksNS());
     int test=M_CheckParm((char*)"-rendercheck");
-    const char *output=test&&test+1<myargc?myargv[test+1]:path;
+    const char *output=test&&test+1<myargc?myargv[test+1]:profile.screenshotPath?profile.screenshotPath:path;
+    profile.screenshotPath=nullptr;
     SDL_Surface *surface=bgra?SDL_CreateSurfaceFrom(width,height,SDL_PIXELFORMAT_BGRA32,(void*)bgra,stride):nullptr;
     bool saved=surface&&SDL_SavePNG(surface,output);SDL_DestroySurface(surface);
     if(!test) players[consoleplayer].message=(char*)(saved?"SCREENSHOT SAVED":"SCREENSHOT FAILED");
@@ -3938,3 +4143,6 @@ int I_Render3DIsAccelerated(void) {return settings.accelerated;}
 void I_Render3DLook(float delta) {if(settings.look&&settings.accelerated&&!demoplayback)pitch=std::clamp(pitch-delta*0.002f,-1.2f,1.2f);}
 void I_Render3DToggleFlashlight(void) {if(settings.accelerated)flashlightOn=!flashlightOn;}
 void I_Render3DScreenshot(void) {screenshotPending=true;}
+const I_Render3DFrameProfile *I_Render3DLastFrame(void) {return &profile.frame;}
+void I_Render3DProfileTeleported(void) {surfaceSelection.clear();surfaceLightTime=0;}
+void I_Render3DScreenshotTo(const char *path) {profile.screenshotPath=path;screenshotPending=true;}

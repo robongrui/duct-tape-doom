@@ -213,6 +213,27 @@ inline float addBakedArea(const BakeMap &map,const BakeArea &area,int sector,flo
     }
     return 0;
 }
+// A sector's light level already shows the lamps its mapper lit it for, so
+// static light only fills the headroom up to bakeLimit, the brightest a
+// lamp-lit surface gets: in full up to half the headroom, then easing toward
+// the limit. Glowing panels lift a 128 room to about 1.25 instead of the
+// clamp, a hallway already at 224 barely rises, and a torch's moderate glow
+// in a dark room stays nearly as it was. world.frag matches this.
+constexpr float bakeLimit=1.25f;
+inline float bakeHeadroom(float sectorLight) {return std::max(bakeLimit-sectorLight,0.0f);}
+inline float bakeShoulder(float light,float headroom) {
+    float knee=headroom*0.5f,rest=headroom-knee;
+    if(light<=knee||rest<=0)return std::min(light,knee);
+    return knee+rest*(1-std::exp(-(light-knee)/rest));
+}
+// Static light on a surface in a sector of that light level: its brightest
+// channel follows bakeShoulder, the others keep their ratio to it.
+inline void fillHeadroom(float rgb[3],float sectorLight) {
+    float peak=std::max({rgb[0],rgb[1],rgb[2]});
+    if(peak<=0)return;
+    float scale=bakeShoulder(peak,bakeHeadroom(sectorLight))/peak;
+    for(int c=0;c<3;++c)rgb[c]*=scale;
+}
 // Bounce gathering direction around a unit normal: (u,v) in [0,1)^2 maps to
 // a cosine-weighted hemisphere, so averaging what the rays hit is the
 // irradiance up to albedo.

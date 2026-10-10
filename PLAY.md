@@ -45,6 +45,7 @@ Use the arrow keys and Return to select menu items.
 | Graphics settings | F4 |
 | Screenshot | F7 |
 | Flashlight (3D renderer) | F |
+| Cheat menu (fly, no monsters, map warp) | F5 |
 | Quit | Command-Q |
 
 On keyboards with media function keys, hold **Fn** when using the F keys.

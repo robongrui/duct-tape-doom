@@ -40,7 +40,7 @@ SDL_GPUSampler *linearRepeat,*linearClamp,*nearestClamp,*detailSampler;
 SDL_GPUShader *worldVertexShader,*reflectVertexShader,*screenVertexShader,*skyVertexShader;
 SDL_GPUGraphicsPipeline *opaquePipeline,*skyPipeline,*skySurfacePipeline,*reflectSkySurfacePipeline,*worldPipeline,*shadowPipeline,*decalPipeline,*particlePipeline,*heatPipeline,
     *weaponPipeline,*hudPipeline,*solidPipeline,*mistPipeline,*shaftPipeline,*overlayWeaponPipeline,*overlayHudPipeline,*overlaySolidPipeline,
-    *reflectOpaquePipeline,*reflectSkyPipeline,*reflectWorldPipeline,*emissionPipeline,*blurPipeline,*presentPipeline,*depthPipeline,
+    *reflectOpaquePipeline,*reflectSkyPipeline,*reflectWorldPipeline,*emissionPipeline,*blurPipeline,*presentPipeline,*depthPipeline,*prepassPipeline,
     *settingsPipeline;
 SDL_GPUTexture *settingsTexture,*hudTexture,*paletteTexture,*paletteLUT,*dummySeam,*dummyContact,*dummyBake,*solidTexel,
     *multisampleTexture,*colorTexture,*depthTexture,*sceneDepth,*emissionTexture,*emissionDepth,*bloomScratch,*bloomTexture,
@@ -142,7 +142,7 @@ SDL_GPUShader *shader(const ShaderCode &code,SDL_GPUShaderStage stage,Uint32 sam
 #define VERTEX_SHADER(name,uniforms) shader(SHADER_CODE(name),SDL_GPU_SHADERSTAGE_VERTEX,0,0,uniforms)
 #define FRAGMENT_SHADER(name,samplers,storage,uniforms) shader(SHADER_CODE(name),SDL_GPU_SHADERSTAGE_FRAGMENT,samplers,storage,uniforms)
 // heatBlend writes only alpha, keeping the lowest (hottest) value.
-enum Blend { opaqueBlend, alphaBlend, heatBlend, addBlend };
+enum Blend { opaqueBlend, alphaBlend, heatBlend, addBlend, mirrorBlend, depthBlend };
 enum Depth { noDepth, depthWrite, depthTest, depthAlways, depthOnly };
 // Geometry pipelines read the 60-byte Vertex; screen and sky passes have no vertex input.
 SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vertex,SDL_GPUShader *fragment,Blend blend,Depth depth,
@@ -171,12 +171,22 @@ SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vertex,SDL_GPUShader *fragment,
         b.src_color_blendfactor=SDL_GPU_BLENDFACTOR_SRC_ALPHA;b.dst_color_blendfactor=SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         b.src_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ONE;b.dst_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         b.color_blend_op=b.alpha_blend_op=SDL_GPU_BLENDOP_ADD;
+    } else if(blend==mirrorBlend) {
+        // Blended like alphaBlend, but the target's alpha (the reflection's
+        // distance from the surface, written by opaque geometry) is kept.
+        auto &b=target.blend_state;b.enable_blend=true;
+        b.src_color_blendfactor=SDL_GPU_BLENDFACTOR_SRC_ALPHA;b.dst_color_blendfactor=SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        b.src_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ZERO;b.dst_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ONE;
+        b.color_blend_op=b.alpha_blend_op=SDL_GPU_BLENDOP_ADD;
     } else if(blend==addBlend) {
         // Light added by alpha; the target's alpha (heat shimmer marks) is kept.
         auto &b=target.blend_state;b.enable_blend=true;
         b.src_color_blendfactor=SDL_GPU_BLENDFACTOR_SRC_ALPHA;b.dst_color_blendfactor=SDL_GPU_BLENDFACTOR_ONE;
         b.src_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ZERO;b.dst_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ONE;
         b.color_blend_op=b.alpha_blend_op=SDL_GPU_BLENDOP_ADD;
+    } else if(blend==depthBlend) {
+        // Depth prepass: the color target stays untouched.
+        target.blend_state.enable_color_write_mask=true;target.blend_state.color_write_mask=0;
     } else if(blend==heatBlend) {
         auto &b=target.blend_state;b.enable_blend=true;b.enable_color_write_mask=true;b.color_write_mask=SDL_GPU_COLORCOMPONENT_A;
         b.src_color_blendfactor=b.src_alpha_blendfactor=b.dst_color_blendfactor=b.dst_alpha_blendfactor=SDL_GPU_BLENDFACTOR_ONE;
@@ -206,6 +216,7 @@ bool createPipelines() {
     const auto one=SDL_GPU_SAMPLECOUNT_1,msaa=sampleCount;
     SDL_GPUShader *wv=worldVertexShader,*rv=reflectVertexShader,*sv=screenVertexShader,*kv=skyVertexShader;
     opaquePipeline=pipeline(wv,opaque,opaqueBlend,depthWrite,msaa,color);
+    prepassPipeline=pipeline(wv,solid,depthBlend,depthWrite,msaa,color);
     skyPipeline=pipeline(kv,sky,opaqueBlend,depthTest,msaa,color);
     skySurfacePipeline=pipeline(wv,skySurface,opaqueBlend,depthWrite,msaa,color);
     worldPipeline=pipeline(wv,world,alphaBlend,depthWrite,msaa,color);
@@ -225,7 +236,7 @@ bool createPipelines() {
     reflectOpaquePipeline=pipeline(rv,opaque,opaqueBlend,depthWrite,one,color);
     reflectSkyPipeline=pipeline(kv,sky,opaqueBlend,depthTest,one,color);
     reflectSkySurfacePipeline=pipeline(rv,skySurface,opaqueBlend,depthWrite,one,color);
-    reflectWorldPipeline=pipeline(rv,world,alphaBlend,depthWrite,one,color);
+    reflectWorldPipeline=pipeline(rv,world,mirrorBlend,depthWrite,one,color);
     emissionPipeline=pipeline(wv,emission,opaqueBlend,depthWrite,one,glow);
     blurPipeline=pipeline(sv,blur,opaqueBlend,noDepth,one,glow);
     presentPipeline=pipeline(sv,present,opaqueBlend,noDepth,one,swapchainFormat);
@@ -237,7 +248,7 @@ bool createPipelines() {
         if(*s) {SDL_ReleaseGPUShader(device,*s);*s=nullptr;}
     for(auto *p:{opaquePipeline,skyPipeline,skySurfacePipeline,reflectSkySurfacePipeline,worldPipeline,shadowPipeline,decalPipeline,particlePipeline,heatPipeline,weaponPipeline,hudPipeline,
                  solidPipeline,mistPipeline,shaftPipeline,overlayWeaponPipeline,overlayHudPipeline,overlaySolidPipeline,reflectOpaquePipeline,
-                 reflectSkyPipeline,reflectWorldPipeline,emissionPipeline,blurPipeline,presentPipeline,depthPipeline,settingsPipeline})
+                 reflectSkyPipeline,reflectWorldPipeline,emissionPipeline,blurPipeline,presentPipeline,depthPipeline,prepassPipeline,settingsPipeline})
         if(!p)return false;
     return true;
 }
@@ -291,8 +302,7 @@ void uploadFrame(SDL_GPUCommandBuffer *command,const std::vector<const std::vect
     for(const auto *groups:{&batches,&shadowBatches,&decalBatches})for(const auto &batch:*groups)place(batch.second);
     place(mistVertices);place(shaftVertices);place(particleVertices);place(heatVertices);place(skyVertices);
     for(const auto *vertices:transient)place(*vertices);
-    LightBlocker emptyBlocker={};
-    Uint32 blockerBytes=(Uint32)(std::max(size_t(1),lightBlockers.size())*sizeof(LightBlocker));
+    Uint32 blockerBytes=(Uint32)(lightWords.size()*sizeof(lightWords[0]));
     Uint32 sectorBytes=(Uint32)(sectors.size()*sizeof(sectors[0]));
     Uint32 vertexBytes=std::max<Uint32>(bytes,256);
     reserve(vertexArena,vertexBytes,SDL_GPU_BUFFERUSAGE_VERTEX);
@@ -310,7 +320,7 @@ void uploadFrame(SDL_GPUCommandBuffer *command,const std::vector<const std::vect
     byte *mapped=(byte*)SDL_MapGPUTransferBuffer(device,frameTransfer,true);
     for(const auto &entry:vertexOffsets)
         memcpy(mapped+entry.second,entry.first->data(),entry.first->size()*sizeof(Vertex));
-    memcpy(mapped+vertexBytes,lightBlockers.empty()?&emptyBlocker:(const void*)lightBlockers.data(),blockerBytes);
+    memcpy(mapped+vertexBytes,lightWords.data(),blockerBytes);
     memcpy(mapped+vertexBytes+blockerBytes,sectors.data(),sectorBytes);
     memcpy(mapped+imageOffset,palette,1024);
     memcpy(mapped+imageOffset+1024,hud.data(),hudBytes);
@@ -390,7 +400,7 @@ void pushWorldUniforms(SDL_GPUCommandBuffer *command,const Uniforms &view) {
     float noBlend[4]={};
     SDL_PushGPUVertexUniformData(command,0,&view,sizeof(view));
     SDL_PushGPUFragmentUniformData(command,0,&view,sizeof(view));
-    SDL_PushGPUFragmentUniformData(command,1,&flashes,sizeof(flashes));
+    SDL_PushGPUFragmentUniformData(command,1,&gpuFlashes,sizeof(gpuFlashes));
     SDL_PushGPUFragmentUniformData(command,2,&fogLights,sizeof(fogLights));
     SDL_PushGPUFragmentUniformData(command,3,noBlend,sizeof(noBlend));
 }
@@ -637,7 +647,7 @@ void I_Render3DShutdown(void) {
     for(SDL_GPUTexture **t:{&settingsTexture,&hudTexture,&paletteTexture,&paletteLUT,&dummySeam,&dummyContact,&dummyBake,&solidTexel,&detailTexture})release(*t);
     for(SDL_GPUGraphicsPipeline **p:{&opaquePipeline,&skyPipeline,&skySurfacePipeline,&reflectSkySurfacePipeline,&worldPipeline,&shadowPipeline,&decalPipeline,&particlePipeline,&heatPipeline,
             &weaponPipeline,&hudPipeline,&solidPipeline,&mistPipeline,&shaftPipeline,&overlayWeaponPipeline,&overlayHudPipeline,&overlaySolidPipeline,
-            &reflectOpaquePipeline,&reflectSkyPipeline,&reflectWorldPipeline,&emissionPipeline,&blurPipeline,&presentPipeline,&depthPipeline,
+            &reflectOpaquePipeline,&reflectSkyPipeline,&reflectWorldPipeline,&emissionPipeline,&blurPipeline,&presentPipeline,&depthPipeline,&prepassPipeline,
             &settingsPipeline})
         release(*p);
     for(SDL_GPUSampler **s:{&linearRepeat,&linearClamp,&nearestClamp,&detailSampler})release(*s,SDL_ReleaseGPUSampler);
@@ -649,6 +659,16 @@ void I_Render3DShutdown(void) {
     }
     device=nullptr;
 }
+void I_Render3DProfile(int enabled,unsigned skip) {
+    profile.skip=enabled?skip:0;
+    if(profile.enabled==(enabled!=0)||!device)return;
+    profile.enabled=enabled!=0;
+    // Without vsync the swapchain never holds a profiled frame back.
+    SDL_GPUPresentMode mode=SDL_GPU_PRESENTMODE_VSYNC;
+    if(profile.enabled&&SDL_WindowSupportsGPUPresentMode(device,gameWindow,SDL_GPU_PRESENTMODE_IMMEDIATE))mode=SDL_GPU_PRESENTMODE_IMMEDIATE;
+    else if(profile.enabled&&SDL_WindowSupportsGPUPresentMode(device,gameWindow,SDL_GPU_PRESENTMODE_MAILBOX))mode=SDL_GPU_PRESENTMODE_MAILBOX;
+    SDL_SetGPUSwapchainParameters(device,gameWindow,SDL_GPU_SWAPCHAINCOMPOSITION_SDR,mode);
+}
 void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
     SDL_GPUCommandBuffer *command=SDL_AcquireGPUCommandBuffer(device);
     if(!command) {fprintf(stderr,"GPU command buffer: %s\n",SDL_GetError());return;}
@@ -656,6 +676,7 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
     if(!SDL_WaitAndAcquireGPUSwapchainTexture(command,gameWindow,&swapchain,&drawableWidth,&drawableHeight)||!swapchain) {
         flushUploads();SDL_SubmitGPUCommandBuffer(command);return;
     }
+    uint64_t frameStart=SDL_GetTicksNS();
     int w=std::max(1,(int)drawableWidth*settings.scale/100),h=std::max(1,(int)drawableHeight*settings.scale/100);
     if(w!=width||h!=height||!colorTexture) {
         width=w;height=h;allocateTargets(w,h);
@@ -685,12 +706,19 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
                    (dw-settingsOrigin[0])/pw,(dh-settingsOrigin[1])/ph);
         transient.push_back(&settingsQuad);
     }
-    uploadFrame(command,transient,sectorInfo(),palette,overlay,settingsImage);
+    // Profiling: the scene goes in a command buffer of its own, timed by a
+    // fence. The swapchain's may wait for the compositor, which in a window
+    // keeps the display's rate even without vsync.
+    SDL_GPUCommandBuffer *render=profile.enabled?SDL_AcquireGPUCommandBuffer(device):command;
+    if(!render) I_Error((char*)"GPU command buffer: %s",SDL_GetError());
+    uploadFrame(render,transient,sectorInfo(),palette,overlay,settingsImage);
     // Liquid reflections: the world drawn again at reduced resolution from a
     // camera mirrored at the liquid height, clipped to above the surface.
-    camera.water[2]=0;
+    // Its alpha holds how near each point is to the surface along the
+    // mirrored ray; the mirror pass is flagged by water = (plane, 0, 0, 1).
+    camera.water[2]=camera.water[3]=0;
     if(worldPending&&reflectionActive) {
-        int divisor=settings.retroReflections?4:2;
+        int divisor=settings.retroReflections?8:2;
         int rw=std::max(1,(int)(view.worldW/divisor)),rh=std::max(1,(int)(view.worldH/divisor));
         if(!reflectionTexture||rw!=reflectionWidth||rh!=reflectionHeight) {
             release(reflectionTexture);release(reflectionDepth);
@@ -701,16 +729,17 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
         }
         Uniforms mirror=camera;
         mirror.eye[2]=2*reflectionPlane-camera.eye[2];mirror.forward[2]=-camera.forward[2];mirror.up[2]=-camera.up[2];
+        mirror.water[0]=reflectionPlane;mirror.water[3]=1;
         SDL_GPUColorTargetInfo color={};
         color.texture=reflectionTexture;color.load_op=SDL_GPU_LOADOP_CLEAR;color.store_op=SDL_GPU_STOREOP_STORE;
         color.clear_color={0.025f,0.025f,0.03f,1};
         SDL_GPUDepthStencilTargetInfo depth={};
         depth.texture=reflectionDepth;depth.clear_depth=1;depth.load_op=SDL_GPU_LOADOP_CLEAR;depth.store_op=SDL_GPU_STOREOP_DONT_CARE;
         depth.stencil_load_op=SDL_GPU_LOADOP_DONT_CARE;depth.stencil_store_op=SDL_GPU_STOREOP_DONT_CARE;
-        SDL_GPURenderPass *pass=SDL_BeginGPURenderPass(command,&color,1,&depth);
-        pushWorldUniforms(command,mirror);
-        float plane[4]={reflectionPlane,0,0,0};SDL_PushGPUVertexUniformData(command,1,plane,sizeof(plane));
-        drawWorld(command,pass,reflectOpaquePipeline,reflectSkySurfacePipeline,reflectSkyPipeline,reflectWorldPipeline,nullptr);
+        SDL_GPURenderPass *pass=SDL_BeginGPURenderPass(render,&color,1,&depth);
+        pushWorldUniforms(render,mirror);
+        float plane[4]={reflectionPlane,0,0,0};SDL_PushGPUVertexUniformData(render,1,plane,sizeof(plane));
+        drawWorld(render,pass,reflectOpaquePipeline,reflectSkySurfacePipeline,reflectSkyPipeline,reflectWorldPipeline,nullptr);
         SDL_EndGPURenderPass(pass);
         camera.water[0]=view.worldX;camera.water[1]=view.worldY;camera.water[2]=1/view.worldW;camera.water[3]=1/view.worldH;
     }
@@ -719,10 +748,10 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
         SDL_GPUDepthStencilTargetInfo depth={};
         depth.texture=sceneDepth;depth.clear_depth=1;depth.load_op=SDL_GPU_LOADOP_CLEAR;depth.store_op=SDL_GPU_STOREOP_STORE;
         depth.stencil_load_op=SDL_GPU_LOADOP_DONT_CARE;depth.stencil_store_op=SDL_GPU_STOREOP_DONT_CARE;
-        SDL_GPURenderPass *pass=SDL_BeginGPURenderPass(command,nullptr,0,&depth);
+        SDL_GPURenderPass *pass=SDL_BeginGPURenderPass(render,nullptr,0,&depth);
         setView(pass,view.worldX,view.worldY,view.worldW,view.worldH);
         SDL_BindGPUGraphicsPipeline(pass,depthPipeline);
-        SDL_PushGPUVertexUniformData(command,0,&camera,sizeof(camera));
+        SDL_PushGPUVertexUniformData(render,0,&camera,sizeof(camera));
         for(const auto &batch:batches) if(!batch.second.empty()) {bindImage(pass,images.at(batch.first).texture,nearestClamp);drawVertices(pass,batch.second);}
         SDL_GPUTextureSamplerBinding solid={solidTexel,nearestClamp};
         SDL_BindGPUFragmentSamplers(pass,0,&solid,1);drawVertices(pass,skyVertices);
@@ -737,13 +766,18 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
     depth.texture=depthTexture;depth.clear_depth=1;depth.load_op=SDL_GPU_LOADOP_CLEAR;
     depth.store_op=drawMist&&!msaa?SDL_GPU_STOREOP_STORE:SDL_GPU_STOREOP_DONT_CARE;
     depth.stencil_load_op=SDL_GPU_LOADOP_DONT_CARE;depth.stencil_store_op=SDL_GPU_STOREOP_DONT_CARE;
-    SDL_GPURenderPass *pass=SDL_BeginGPURenderPass(command,&color,1,&depth);
-    pushWorldUniforms(command,camera);
+    SDL_GPURenderPass *pass=SDL_BeginGPURenderPass(render,&color,1,&depth);
+    pushWorldUniforms(render,camera);
     if(worldPending) {
         setView(pass,view.worldX,view.worldY,view.worldW,view.worldH);
         // Only fully covered textures use early depth writes. Cutouts and
         // sprites retain discard-aware shading after the sky background.
-        drawWorld(command,pass,opaquePipeline,skySurfacePipeline,skyPipeline,worldPipeline,camera.water[2]>0?reflectionTexture:nullptr);
+        // The whole map is drawn each frame in texture order, so without a
+        // depth prepass hidden walls and floors would run the full lighting
+        // before nearer ones cover them; with it each pixel shades once.
+        SDL_BindGPUGraphicsPipeline(pass,prepassPipeline);
+        for(const auto &batch:batches) if(opaqueBatch(batch)) drawVertices(pass,batch.second);
+        drawWorld(render,pass,opaquePipeline,skySurfacePipeline,skyPipeline,worldPipeline,camera.water[2]>0?reflectionTexture:nullptr);
         // The completed world depth hides shadows behind walls and enemies.
         SDL_BindGPUGraphicsPipeline(pass,shadowPipeline);
         for(const auto &batch:shadowBatches) {bindImage(pass,images.at(-1-batch.first).texture,linearClamp);drawVertices(pass,batch.second);}
@@ -758,11 +792,11 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
         color.load_op=SDL_GPU_LOADOP_LOAD;
         color.store_op=msaa?SDL_GPU_STOREOP_RESOLVE:SDL_GPU_STOREOP_STORE;
         color.resolve_texture=msaa?colorTexture:nullptr;
-        pass=SDL_BeginGPURenderPass(command,&color,1,nullptr);
+        pass=SDL_BeginGPURenderPass(render,&color,1,nullptr);
         setView(pass,view.worldX,view.worldY,view.worldW,view.worldH);
         SDL_BindGPUGraphicsPipeline(pass,mistPipeline);
-        SDL_PushGPUVertexUniformData(command,0,&camera,sizeof(camera));
-        SDL_PushGPUFragmentUniformData(command,0,&camera,sizeof(camera));
+        SDL_PushGPUVertexUniformData(render,0,&camera,sizeof(camera));
+        SDL_PushGPUFragmentUniformData(render,0,&camera,sizeof(camera));
         SDL_GPUTextureSamplerBinding mist[]={{gpu(cloudTexture),linearRepeat},{msaa?sceneDepth:depthTexture,nearestClamp}};
         SDL_BindGPUFragmentSamplers(pass,0,mist,2);
         drawVertices(pass,mistVertices);
@@ -770,9 +804,9 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
             SDL_BindGPUGraphicsPipeline(pass,shaftPipeline);SDL_BindGPUFragmentSamplers(pass,0,mist,2);
             drawVertices(pass,shaftVertices);
         }
-        pushWorldUniforms(command,camera);
+        pushWorldUniforms(render,camera);
     }
-    drawOverlays(command,pass,view,weapons,hud,cross,!drawMist);
+    drawOverlays(render,pass,view,weapons,hud,cross,!drawMist);
     SDL_EndGPURenderPass(pass);
     if(camera.materials[1]>0) {
         int bw=std::max(1,width/2),bh=std::max(1,height/2);
@@ -782,33 +816,52 @@ void I_Render3DPresent(const unsigned *pixels,const unsigned *palette) {
         SDL_GPUDepthStencilTargetInfo glowDepth={};
         glowDepth.texture=emissionDepth;glowDepth.clear_depth=1;glowDepth.load_op=SDL_GPU_LOADOP_CLEAR;
         glowDepth.store_op=SDL_GPU_STOREOP_DONT_CARE;glowDepth.stencil_load_op=SDL_GPU_LOADOP_DONT_CARE;glowDepth.stencil_store_op=SDL_GPU_STOREOP_DONT_CARE;
-        SDL_GPURenderPass *glowPass=SDL_BeginGPURenderPass(command,&glow,1,&glowDepth);
+        SDL_GPURenderPass *glowPass=SDL_BeginGPURenderPass(render,&glow,1,&glowDepth);
         SDL_Rect area={0,0,bw,bh};
         setView(glowPass,view.worldX*sx,view.worldY*sy,view.worldW*sx,view.worldH*sy,&area);
         SDL_BindGPUGraphicsPipeline(glowPass,emissionPipeline);
-        SDL_PushGPUVertexUniformData(command,0,&camera,sizeof(camera));
+        SDL_PushGPUVertexUniformData(render,0,&camera,sizeof(camera));
         SDL_GPUTextureSamplerBinding palette={paletteTexture,nearestClamp};
         SDL_BindGPUFragmentSamplers(glowPass,1,&palette,1);
-        for(const auto &batch:batches) if(!batch.second.empty()) {bindSurface(command,glowPass,batch.first,0,false);drawVertices(glowPass,batch.second);}
+        for(const auto &batch:batches) if(!batch.second.empty()) {bindSurface(render,glowPass,batch.first,0,false);drawVertices(glowPass,batch.second);}
         // The sky hides glow behind it: a covered texel with no emission.
         SDL_GPUTextureSamplerBinding solid={solidTexel,nearestClamp};
         SDL_BindGPUFragmentSamplers(glowPass,0,&solid,1);SDL_BindGPUFragmentSamplers(glowPass,2,&solid,1);
-        float noBlend[4]={};SDL_PushGPUFragmentUniformData(command,0,noBlend,sizeof(noBlend));
+        float noBlend[4]={};SDL_PushGPUFragmentUniformData(render,0,noBlend,sizeof(noBlend));
         drawVertices(glowPass,skyVertices);
+        // The weapon hides glow behind it too; it is drawn over the view in
+        // the HUD's frame, so the glow from lamps behind it would otherwise
+        // show through it.
+        if(!weapons.empty()) {
+            setView(glowPass,view.uiX*sx,view.uiY*sy,view.uiWidth*sx,view.uiHeight*sy,&area);
+            for(const auto &draw:weapons) {
+                SDL_GPUTextureSamplerBinding image[]={{gpu(draw.image->texture),nearestClamp},{paletteTexture,nearestClamp},{gpu(draw.image->texture),nearestClamp}};
+                SDL_BindGPUFragmentSamplers(glowPass,0,image,3);drawVertices(glowPass,draw.vertices);
+            }
+        }
         SDL_EndGPURenderPass(glowPass);
         for(int axis=0;axis<2;++axis) {
             SDL_GPUColorTargetInfo blur={};
             blur.texture=axis?bloomTexture:bloomScratch;blur.load_op=SDL_GPU_LOADOP_DONT_CARE;blur.store_op=SDL_GPU_STOREOP_STORE;
-            SDL_GPURenderPass *blurPass=SDL_BeginGPURenderPass(command,&blur,1,nullptr);
+            SDL_GPURenderPass *blurPass=SDL_BeginGPURenderPass(render,&blur,1,nullptr);
             SDL_BindGPUGraphicsPipeline(blurPass,blurPipeline);
             SDL_GPUTextureSamplerBinding source={axis?bloomScratch:emissionTexture,linearClamp};
             SDL_BindGPUFragmentSamplers(blurPass,0,&source,1);
             // Radius scales with resolution, retaining a similar halo at 50–100%.
             float direction[4]={axis?0:0.0035f,axis?0.0056f:0,0,0};
-            SDL_PushGPUFragmentUniformData(command,0,direction,sizeof(direction));
+            SDL_PushGPUFragmentUniformData(render,0,direction,sizeof(direction));
             SDL_DrawGPUPrimitives(blurPass,3,1,0,0);
             SDL_EndGPURenderPass(blurPass);
         }
+    }
+    if(render!=command) {
+        flushUploads();
+        uint64_t submit=SDL_GetTicksNS();
+        SDL_GPUFence *fence=SDL_SubmitGPUCommandBufferAndAcquireFence(render);
+        if(!fence) I_Error((char*)"GPU rendering failed: %s",SDL_GetError());
+        SDL_WaitForGPUFences(device,true,&fence,1);SDL_ReleaseGPUFence(device,fence);
+        uint64_t done=SDL_GetTicksNS();
+        profile.frame.cpuMs=(submit-frameStart)/1e6;profile.frame.gpuMs=(done-submit)/1e6;
     }
     present(command,swapchain,view);
     flushUploads();

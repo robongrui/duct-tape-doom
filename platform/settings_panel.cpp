@@ -61,6 +61,10 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                     "Gloss highlights are tight and bright where the artwork runs smooth and broad and dim where it is busy, "
                     "with slime and blue panels sharper than worn grey metal.",
                     [](const Settings &d){return d.detail!=0;}),
+                check("Relit weapon",&s.weaponLighting,
+                    "The sheen and light painted into the weapon artwork are taken out, and the lights around you relight it: "
+                    "their color, darker rounded edges, glowing rims against lights behind it, and highlights that slide over "
+                    "the metal as you look around and the weapon bobs."),
                 choice("Detail textures",&s.detailTextures,{"Off","With filtered walls","Always"},{0,1,2},
                     "A fine grain over walls and floors that shows only up close and fades out with distance, picked per texture "
                     "from its colors (stone, metal, wood, flesh). Scale and distance are in graphics.cfg (detail_scale, detail_fade)."),
@@ -122,7 +126,7 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                 check("Reflections",&s.reflections,
                     "Mirror the scene in nearby water, nukage, slime and blood; renders the view a second time at half resolution."),
                 check("Retro reflections (PS1 style)",&s.retroReflections,
-                    "Quarter resolution, hard pixels, Doom palette colors and a stepped wobble.",
+                    "Eighth resolution, hard pixels, Doom palette colors and a stepped wobble.",
                     [](const Settings &d){return d.reflections!=0;}),
                 check("Caustics",&s.caustics,
                     "Rippling light from water, nukage, slime, blood and lava on the walls around them; pattern taken from the level's liquid flat."),

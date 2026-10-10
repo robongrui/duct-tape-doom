@@ -47,6 +47,11 @@
 // Command line parameters.
 //
 extern  boolean	nomonsters;	// checkparm of -nomonsters
+// Renderer debugging toggles from the F5 cheat menu (or "idfly" for all).
+extern  boolean	debugfly;
+extern  boolean	debugnoclip;
+extern  boolean	debuggod;
+extern  boolean	debugnomonsters;
 extern  boolean	respawnparm;	// checkparm of -respawn
 extern  boolean	fastparm;	// checkparm of -fast
 extern  boolean classicmovement;

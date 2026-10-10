@@ -35,6 +35,8 @@ rcsid[] = "$Id: p_user.c,v 1.3 1997/01/28 22:08:29 b1 Exp $";
 
 #include "doomstat.h"
 
+#include <math.h>
+
 
 
 // Index of the special effects (INVUL inverse) map.
@@ -54,6 +56,95 @@ boolean		onground;
 boolean P_UseResponsiveMovement (void)
 {
     return !classicmovement && !demoplayback && !demorecording && !netgame;
+}
+
+
+//
+// Renderer debugging cheats (F5 menu). Flying follows the view direction
+// (E/Q rise and sink); god mode and flight also ignore special sectors so
+// damaging and exit floors cannot end the visit. The settings outlive map
+// changes, unlike player->cheats.
+//
+extern boolean	gamekeydown[];
+extern int	key_speed;
+
+float		tourpitch;
+
+boolean P_DebugAllowed (void)
+{
+    return !demoplayback && !demorecording && !netgame;
+}
+
+boolean P_Flying (void)
+{
+    return debugfly && P_DebugAllowed ();
+}
+
+void P_SetCheat (player_t* player, boolean* setting, boolean on)
+{
+    int		bit = setting == &debugnoclip ? CF_NOCLIP
+		    : setting == &debuggod ? CF_GODMODE
+		    : setting == &debugfly ? CF_NOMOMENTUM : 0;
+
+    *setting = on;
+    if (on)
+	player->cheats |= bit;
+    else
+	player->cheats &= ~bit;
+    if (setting == &debuggod && on)
+    {
+	player->health = 100;
+	if (player->mo)
+	    player->mo->health = 100;
+    }
+    if (setting == &debugfly && !on && player->mo)
+	player->mo->flags &= ~MF_NOGRAVITY;
+}
+
+void P_SetTour (player_t* player, boolean on)
+{
+    P_SetCheat (player, &debugfly, on);
+    P_SetCheat (player, &debugnoclip, on);
+    P_SetCheat (player, &debuggod, on);
+    debugnomonsters = on;
+}
+
+static void P_RemoveMonsters (void)
+{
+    thinker_t*	th;
+    mobj_t*	mo;
+
+    for (th = thinkercap.next; th != &thinkercap; th = th->next)
+    {
+	if (th->function.acp1 != (actionf_p1)P_MobjThinker)
+	    continue;
+	mo = (mobj_t *)th;
+	if (!mo->player && (mo->type == MT_SKULL || (mo->flags & MF_COUNTKILL)))
+	    P_RemoveMobj (mo);
+    }
+}
+
+static void P_FlyMove (player_t* player)
+{
+    ticcmd_t*	cmd = &player->cmd;
+    mobj_t*	mo = player->mo;
+    fixed_t	speed = FRACUNIT*2/5;
+    fixed_t	forward = cmd->forwardmove*speed;
+    fixed_t	side = cmd->sidemove*speed;
+    fixed_t	flat = (fixed_t)(cos (tourpitch)*FRACUNIT);
+    fixed_t	rise = (fixed_t)(sin (tourpitch)*FRACUNIT);
+    angle_t	a = mo->angle >> ANGLETOFINESHIFT;
+    angle_t	s = (mo->angle-ANG90) >> ANGLETOFINESHIFT;
+    fixed_t	climb = gamekeydown[key_speed] ? 20*FRACUNIT : 10*FRACUNIT;
+
+    forward = FixedMul (forward, flat);
+    mo->momx = FixedMul (forward, finecosine[a]) + FixedMul (side, finecosine[s]);
+    mo->momy = FixedMul (forward, finesine[a]) + FixedMul (side, finesine[s]);
+    mo->momz = FixedMul (cmd->forwardmove*speed, rise);
+    if (gamekeydown['e'])
+	mo->momz += climb;
+    if (gamekeydown['q'])
+	mo->momz -= climb;
 }
 
 
@@ -164,6 +255,13 @@ void P_MovePlayer (player_t* player)
 	
     player->mo->angle += (cmd->angleturn<<16);
 
+    if (P_Flying ())
+    {
+	onground = false;
+	P_FlyMove (player);
+	return;
+    }
+
     // Do not let the player control movement
     //  if not onground.
     onground = (player->mo->z <= player->mo->floorz);
@@ -249,6 +347,21 @@ void P_PlayerThink (player_t* player)
     ticcmd_t*		cmd;
     weapontype_t	newweapon;
 	
+    if (P_DebugAllowed ())
+    {
+	if (debugnoclip)
+	    player->cheats |= CF_NOCLIP;
+	if (debuggod)
+	    player->cheats |= CF_GODMODE;
+	if (debugfly)
+	{
+	    player->cheats |= CF_NOMOMENTUM;
+	    player->mo->flags |= MF_NOGRAVITY;
+	}
+	if (debugnomonsters)
+	    P_RemoveMonsters ();
+    }
+
     // fixme: do this in the cheat code
     if (player->cheats & CF_NOCLIP)
 	player->mo->flags |= MF_NOCLIP;
@@ -282,7 +395,8 @@ void P_PlayerThink (player_t* player)
     
     P_CalcHeight (player);
 
-    if (player->mo->subsector->sector->special)
+    if (player->mo->subsector->sector->special
+	&& !((debugfly || debuggod) && P_DebugAllowed ()))
 	P_PlayerInSpecialSector (player);
     
     // Check for weapon change.

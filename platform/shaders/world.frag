@@ -46,7 +46,8 @@ layout(set=2,binding=15) uniform sampler2D shore;
 #define BLOCKER_BINDING 16
 #define SECTOR_BINDING 17
 #endif
-layout(std430,set=2,binding=BLOCKER_BINDING) readonly buffer Blockers { LightBlocker blockers[]; };
+// Each light's blockers and per-direction slices (buildLightWords in scene3d.cpp).
+layout(std430,set=2,binding=BLOCKER_BINDING) readonly buffer Blockers { uvec4 lightWords[]; };
 layout(std430,set=2,binding=SECTOR_BINDING) readonly buffer Sectors { vec4 sectorInfo[]; };
 layout(std140,set=3,binding=0) uniform Camera CAMERA_BLOCK c;
 layout(std140,set=3,binding=1) uniform Lights FLASH_BLOCK;
@@ -104,6 +105,23 @@ vec3 detailNormal(vec2 uv,vec3 normal,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2,out 
     vec2 slope=vec2(tr+2.0*r+br-tl-2.0*l-bl,bl+2.0*b+br-tl-2.0*t-tr)*0.25;
     busy=length(slope);
     return tiltNormal(normal,slope*0.9,dp1,dp2,duv1,duv2);
+}
+// Static light fills only the headroom the sector's own light level leaves,
+// easing toward a limit (bakeShoulder in baked_lighting.h); the bake applies
+// it, and the static lights' dynamic copies take the same share for their
+// detail and gloss: surfaces recover it from the baked value, sprites per light.
+float bakeHeadroom(float sectorLight) {return max(1.25-sectorLight,0.0);}
+float bakeShoulder(float light,float headroom) {
+    float knee=headroom*0.5,rest=headroom-knee;
+    if(light<=knee||rest<=0.0) return min(light,knee);
+    return knee+rest*(1.0-exp(-(light-knee)/rest));
+}
+// The share of the static light a baked value (its brightest channel) kept.
+float bakeKept(float baked,float headroom) {
+    float knee=headroom*0.5,rest=headroom-knee;
+    if(baked<=knee||rest<=0.0) return 1.0;
+    float raw=knee-rest*log(max(1.0-(baked-knee)/rest,1.0/64.0));
+    return baked/raw;
 }
 // Crude materials from the palette's ramps: greys and blues read as metal,
 // greens as wet slime or panels; browns, tans and flesh stay matte.
@@ -561,6 +579,26 @@ void main() {
     if(sprite&&(vMode&128u)!=0u&&c.effects.z==0.0)
         grounding=round(mix(1.0,mix(0.72,1.0,smoothstep(0.0,24.0,vSun.y)),vSun.x)*16.0)/16.0;
     light*=grounding;
+    // Mode 1|8: the relit weapon (weaponDraws, weapon_lighting.h). Its
+    // painted light was taken out at load; its normals face the viewer, and
+    // its gloss sits two columns past the artwork's right edge. It stands
+    // about ten units ahead of the eye, where the screen pixel points. The
+    // sector's light falls from above: undersides and the rounded edges
+    // that turn away from the eye darken, in the colormaps' 1/16 steps.
+    bool weapon=sprite&&(vMode&9u)==9u&&c.effects.z==0.0;
+    vec3 weaponNormal=vec3(0),weaponAt=vec3(0),weaponView=vec3(0);float weaponGloss=0.0;
+    if(weapon) {
+        ivec2 size=textureSize(image,0),p=clamp(ivec2(floor(vUV)),ivec2(0),size-1);
+        int width=(size.x-2)/2;
+        vec2 packed=texelFetch(image,p,0).ba*2.0-1.0;
+        if((vMode&16u)!=0u) packed.x=-packed.x;
+        weaponGloss=texelFetch(image,ivec2(min(p.x,width-1)+width+2,p.y),0).r;
+        weaponNormal=normalize(c.right.xyz*packed.x-c.up.xyz*packed.y-c.forward.xyz*sqrt(saturate(1.0-dot(packed,packed))));
+        weaponAt=c.eye.xyz+10.0*(c.forward.xyz+c.right.xyz*vWorld.x/c.projection.x+c.up.xyz*vWorld.y/c.projection.y);
+        weaponView=normalize(c.eye.xyz-weaponAt);
+        float edge=1.0-saturate(dot(weaponNormal,weaponView));
+        light=round(light*(0.95+0.25*weaponNormal.z)*(1.0-0.4*edge*edge)*16.0)/16.0;
+    }
     // Preserve the sprite's painted shading with one RGB increment for the
     // whole billboard; world surfaces evaluate colored lighting per pixel.
     vec3 illumination=vec3(light)*mix(vec3(1),c.sun.rgb,sunShare)*mix(vec3(1),c.fx.yzw,skyShare),specular=vec3(0);
@@ -568,7 +606,7 @@ void main() {
         // Sprites carry their baked light (and, without detail, their
         // dynamic light) in the tint.
         vec3 pulse=sprite?vTint*grounding:vec3(0);
-        if(sprite&&(vMode&8u)!=0u) {
+        if(sprite&&(vMode&9u)==8u) {
             // Billboards face the camera horizontally and stand upright.
             ivec2 size=textureSize(image,0);
             vec2 packed=texelFetch(image,clamp(ivec2(floor(vUV)),ivec2(0),size-1),0).ba*2.0-1.0;
@@ -603,6 +641,7 @@ void main() {
                 mask[word]&=mask[word]-1u;
                 float amount=flashAt(vWorld,i);
                 if(amount<=0.0) continue;
+                if(c.bake.x>0.0) amount*=mix(1.0,bakeShoulder(amount,bakeHeadroom(vLight))/amount,lights[i].baked);
                 vec3 toLight=normalize(lights[i].position.xyz-vWorld);
                 float facing=saturate(dot(n,toLight));
                 // Backlit edges: silhouette normals that face the light glow.
@@ -618,6 +657,49 @@ void main() {
                 }
             }
         }
+        if(weapon) {
+            // Lights around the player tint and shape the weapon with a
+            // capped share, so they never wash out the artwork; the side
+            // facing a light takes most of it. Highlights
+            // come in two hard steps on the gloss map, sharper where it is
+            // glossier: polish over dark metal, not an even sheen. The light
+            // from above gives one too, sliding over the metal as the view
+            // pitches and the weapon bobs.
+            vec3 n=weaponNormal,view=weaponView;
+            float shininess=10.0+30.0*weaponGloss;
+            float top=pow(saturate(dot(n,normalize(vec3(0,0,1)+view))),shininess);
+            specular+=vec3(light*weaponGloss*(top>0.5?0.35:top>0.2?0.15:0.0));
+            if(c.bake.z>0.0&&vStatic!=0u) {
+                vec4 statics=unpackUnorm4x8(vStatic);
+                vec3 toLight=normalize(statics.xyz*2.0-1.0);
+                float facing=saturate(dot(n,toLight));
+                float rim=pow(1.0-saturate(dot(n,view)),2.0)*facing*saturate(0.35-dot(toLight,view));
+                float highlight=pow(saturate(dot(n,normalize(toLight+view))),shininess);
+                specular+=pulse*statics.w*weaponGloss*(highlight>0.5?1.6:highlight>0.2?0.6:0.0);
+                pulse*=mix(1.0,0.25+1.0*facing+1.6*rim,statics.w);
+            }
+            uvec2 mask=vLightMask;
+            while(any(notEqual(mask,uvec2(0)))) {
+                uint word=mask.x!=0u?0u:1u;
+                uint i=word*32u+uint(findLSB(mask[word]));
+                mask[word]&=mask[word]-1u;
+                float amount=flashAt(weaponAt,i);
+                if(amount<=0.0) continue;
+                amount=min(amount,1.5)*0.5;
+                vec3 toLight=normalize(lights[i].position.xyz-weaponAt);
+                float facing=saturate(dot(n,toLight));
+                float rim=pow(1.0-saturate(dot(n,view)),2.0)*facing*saturate(0.35-dot(toLight,view));
+                // A static light's light already arrives in the tint, and a
+                // bright sector leaves it little headroom; its copy only
+                // moves that light toward the side facing it, keeping about
+                // the same total, so it shapes the weapon even in bright rooms.
+                float bakedShare=c.bake.x>0.0?lights[i].baked:0.0;
+                pulse+=lights[i].color.rgb*amount*(0.15+1.1*facing+1.6*rim-0.6*bakedShare);
+                float highlight=pow(saturate(dot(n,normalize(toLight+view))),shininess);
+                specular+=lights[i].color.rgb*amount*weaponGloss*(highlight>0.5?1.6:highlight>0.2?0.6:0.0);
+            }
+            pulse=max(pulse,vec3(0));
+        }
         if(!sprite) {
             uvec2 mask=vLightMask;
             // Bake-only lights: the bake's direction (share in b) stands in
@@ -627,6 +709,7 @@ void main() {
             vec3 staticLight=useBake?baked.rgb*occlusion:vec3(0);
             float staticShare=useBake&&c.bake.z>0.0?direction.b:0.0;
             bool staticDetail=staticShare>0.05&&dot(staticLight,vec3(0.299,0.587,0.114))>0.02;
+            float staticKept=useBake?bakeKept(max(baked.r,max(baked.g,baked.b)),bakeHeadroom(vLight)):1.0;
             bool detail=(uint(c.flashlightTint.w)&1u)!=0u&&(any(notEqual(mask,uvec2(0)))||staticDetail);
             // Glass is smooth: its bulge replaces the artwork's bump detail,
             // and it takes a tighter, stronger highlight than painted metal.
@@ -702,6 +785,7 @@ void main() {
                 float amount=flashAt(vWorld,i);
                 if(amount<=0.0) continue;
                 float bakedShare=useBake?lights[i].baked:0.0;
+                amount*=mix(1.0,staticKept,bakedShare);
                 pulse+=lights[i].color.rgb*amount*(flashFacing(vWorld,bumped,i)-bakedShare*flashFacing(vWorld,normal,i));
                 if(gloss>0.0) {
                     vec3 toLight=normalize(lights[i].position.xyz-vWorld);
@@ -766,6 +850,15 @@ void main() {
             if(retro) band=step(0.5,band);
             if(band>0.0&&d>0.001) wobble+=away/d*band*ring.w*0.02;
         }
+        // The reflection's alpha: how near the mirrored point lies to the
+        // surface along its ray (1 touching it). Far things fade and break up.
+        float near=textureLod(reflection,(gl_FragCoord.xy-c.water.xy)*c.water.zw+wobble,0.0).a;
+        // The liquid's own artwork breaks the mirror up texel by texel: the
+        // slope of its luminance shoves the lookup, so the image shatters on
+        // Doom's texel grid and churns with the flat's animation.
+        ivec2 cell=ivec2(floor(vUV));
+        float here=texelLuma(cell);
+        wobble+=vec2(texelLuma(cell+ivec2(1,0))-here,texelLuma(cell+ivec2(0,1))-here)*mix(0.15,0.04,near);
         vec2 uv=(gl_FragCoord.xy-c.water.xy)*c.water.zw+wobble;
         vec3 mirrored;
         if(retro) {
@@ -773,8 +866,14 @@ void main() {
             mirrored=texelFetch(reflection,clamp(ivec2(floor(uv*vec2(size))),ivec2(0),size-1),0).rgb;
             mirrored=texelFetch(paletteLUT,ivec3(round(saturate(mirrored)*31.0)),0).rgb;
         } else mirrored=textureLod(reflection,uv,0.0).rgb;
+        // Murky, not glass: the liquid stains what it mirrors in its own hue,
+        // and only bright things (lights, sky, fire) punch through; dim walls
+        // sink into the water. Grazing views still reflect more.
+        float hue=max(max(albedo.r,albedo.g),max(albedo.b,0.05));
+        mirrored*=mix(vec3(1),albedo/hue,0.3);
+        float bright=smoothstep(0.08,0.6,dot(mirrored,vec3(0.299,0.587,0.114)));
         float grazing=1.0-saturate(abs(normalize(c.eye.xyz-vWorld).z));
-        color.rgb=mix(color.rgb,mirrored,0.2+0.4*pow(grazing,3.0));
+        color.rgb=mix(color.rgb,mirrored,(0.18+0.42*pow(grazing,3.0))*mix(0.55,1.0,bright)*mix(0.15,1.0,near));
     }
     if((vMode&1u)==0u) {
         vec4 fog=fogAlong(vWorld);
@@ -802,6 +901,14 @@ void main() {
         depth=f/(f-n)-n*f/((f-n)*z);
     }
     gl_FragDepth=depth;
+#else
+    // Mirror pass (water = plane,0,0,1): alpha holds how near the point is
+    // to the liquid surface along the mirrored ray, sharp within a step's
+    // height, gone a couple of storeys up. Blended geometry keeps it.
+    if(c.water.z==0.0&&c.water.w>0.0) {
+        float along=max(vWorld.z-c.water.x,0.0)/max(abs(normalize(vWorld-c.eye.xyz).z),0.05);
+        color.a=1.0-smoothstep(16.0,256.0,along);
+    }
 #endif
     outColor=color;
 }

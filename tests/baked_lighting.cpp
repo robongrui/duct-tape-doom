@@ -47,6 +47,10 @@ int main() {
     float near=baked(map,torch,0,80,1,floorUp),far=baked(map,torch,1,200,1,floorUp);
     check(near>far&&far>0,"Baked light must fall off with distance across an opening");
     check(baked(map,torch,0,400,1,floorUp)==0,"Baked light must end at its radius");
+    float dim[3]={0.3f,0.3f,0.3f},lamp[3]={2.5f,2.5f,2.5f},bright[3]={2.5f,2.5f,2.5f};
+    fillHeadroom(dim,0.25f);fillHeadroom(lamp,0.5f);fillHeadroom(bright,224/255.0f);
+    check(dim[0]==0.3f&&lamp[0]+0.5f<=bakeLimit&&lamp[0]>0.6f&&bright[0]+224/255.0f<=bakeLimit,
+          "Static light must fill only the headroom a sector's light level leaves");
     map=rooms({0,128,true,{}},{0,64,true,{}},{0,64,false,{}});
     torch.z=100;
     check(baked(map,torch,1,200,63,floorUp)>0,"Light must pass over a lower sky neighbor's ceiling");

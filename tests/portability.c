@@ -222,7 +222,7 @@ static int sprite_glow(void)
 static int flash_culling(void)
 {
     static doom_light_blocker_t all[600],kept[600];
-    uint32_t seed=12345,before=0,after=0;
+    uint32_t seed=12345,before=0,after=0,sliced=0;
 #define RANDOM() ((seed=seed*1664525u+1013904223u)>>8)/16777216.0f
     for(int scene=0;scene<40;++scene) {
         float yaw=RANDOM()*6.2832f,pitch=(RANDOM()-0.5f)*2.6f;
@@ -244,6 +244,10 @@ static int flash_culling(void)
         memcpy(kept,all,sizeof(all));
         doom_flash_t culled=light;culled.count=doom_flash_cull_hidden(&light,kept,count);light.count=count;
         before+=count;after+=culled.count;
+        static uint16_t indices[65535];
+        uint32_t table[DOOM_FLASH_SLICES],listed=doom_flash_slice_blockers(&culled,kept,culled.count,table,indices,65535);
+        CHECK(listed!=UINT32_MAX);
+        sliced+=listed;
         for(int i=0;i<4000;++i) {
             float r=light.position[3]*RANDOM(),a=RANDOM()*6.2832f;
             float x=cosf(a)*r,y=sinf(a)*r,z=32+(RANDOM()-0.5f)*2*light.position[3];
@@ -251,11 +255,14 @@ static int flash_culling(void)
                 x=(light.direction[0]+(RANDOM()-0.5f)*0.8f)*r;y=(light.direction[1]+(RANDOM()-0.5f)*0.8f)*r;
                 z=32+(light.direction[2]+(RANDOM()-0.5f)*0.8f)*r;
             }
-            CHECK(doom_flash_at(x,y,z,&light,all)==doom_flash_at(x,y,z,&culled,kept));
+            float full=doom_flash_at(x,y,z,&light,all);
+            CHECK(full==doom_flash_at(x,y,z,&culled,kept));
+            CHECK(full==doom_flash_at_sliced(x,y,z,&culled,kept,table,indices));
         }
     }
 #undef RANDOM
     CHECK(after*2<before); /* Most of a dense scene is hidden. */
+    CHECK(sliced<after*DOOM_FLASH_SLICES/8); /* A slice holds a few of them. */
     return 0;
 }
 

@@ -23,29 +23,49 @@ float flashAtOpen(vec3 point,uint i) {
 // A glowing panel (direction.x without a cone) is a vertical span of that
 // half-height: the heights s on it whose rays pass every opening narrow to
 // [low,high], so a lip hiding part of the panel lets part of its light by.
+// One blocker, at word j: false when it stops the ray.
+bool flashPasses(uint j,vec3 origin3,vec3 delta,inout float low,inout float high) {
+    vec4 line=uintBitsToFloat(lightWords[j]);
+    vec2 edge=line.zw-line.xy,origin=line.xy-origin3.xy;
+    float det=cross2(delta.xy,edge);
+    if(abs(det)<0.0001) return true;
+    float t=cross2(origin,edge),u=cross2(origin,delta.xy);
+    if(det<0.0) {det=-det;t=-t;u=-u;}
+    if(t>0.001*det&&t<0.999*det&&u>=0.0&&u<=det) {
+        // The ray from height s on the span crosses at hit+s*lever.
+        float along=t/det,hit=origin3.z+delta.z*along,lever=1.0-along;
+        vec2 opening=uintBitsToFloat(lightWords[j+1u]).xy+vec2(0.02,-0.02);
+        if(opening.x>=opening.y) return false;
+        float below=(opening.x-hit)/lever,above=(opening.y-hit)/lever;
+        if(below>=high||above<=low) return false;
+        low=max(low,below);high=min(high,above);
+    }
+    return true;
+}
+// Lights with many blockers (first's top bit) list them per azimuth slice
+// after the blockers (doom_flash_slice_blockers): a table of first<<16|count
+// per slice, then 16-bit indices. A ray meets no wall outside its azimuth.
+#define FLASH_SLICES 256u
 float flashAt(vec3 point,uint i) {
     float amount=flashAtOpen(point,i);
     if(amount<=0.0) return 0.0;
     vec3 origin3=lights[i].position.xyz;
     vec3 delta=point-origin3;
     float extent=lights[i].direction.w>0.0?0.0:lights[i].direction.x,low=-extent,high=extent;
-    for(uint j=lights[i].first;j<lights[i].first+lights[i].count;++j) {
-        vec4 line=blockers[j].line;
-        vec2 edge=line.zw-line.xy,origin=line.xy-origin3.xy;
-        float det=cross2(delta.xy,edge);
-        if(abs(det)<0.0001) continue;
-        float t=cross2(origin,edge),u=cross2(origin,delta.xy);
-        if(det<0.0) {det=-det;t=-t;u=-u;}
-        if(t>0.001*det&&t<0.999*det&&u>=0.0&&u<=det) {
-            // The ray from height s on the span crosses at hit+s*lever.
-            float along=t/det,hit=origin3.z+delta.z*along,lever=1.0-along;
-            vec2 opening=blockers[j].opening.xy+vec2(0.02,-0.02);
-            if(opening.x>=opening.y) return 0.0;
-            float below=(opening.x-hit)/lever,above=(opening.y-hit)/lever;
-            if(below>=high||above<=low) return 0.0;
-            low=max(low,below);high=min(high,above);
+    uint first=lights[i].first&0x7fffffffu,count=lights[i].count;
+    if((lights[i].first&0x80000000u)!=0u) {
+        // Straight above or below the light no wall is crossed.
+        if(delta.x!=0.0||delta.y!=0.0) {
+            float turn=(atan(delta.y,delta.x)+3.14159265)*(float(FLASH_SLICES)/6.2831853);
+            uint slice=min(uint(max(turn,0.0)),FLASH_SLICES-1u);
+            uint table=first+2u*count,indices=table+FLASH_SLICES/4u;
+            uint entry=lightWords[table+slice/4u][slice%4u];
+            for(uint n=entry>>16u,end=n+(entry&0xffffu);n<end;++n) {
+                uint j=(lightWords[indices+n/8u][(n/2u)%4u]>>(16u*(n&1u)))&0xffffu;
+                if(!flashPasses(first+2u*j,origin3,delta,low,high)) return 0.0;
+            }
         }
-    }
+    } else for(uint j=first;j<first+2u*count;j+=2u) if(!flashPasses(j,origin3,delta,low,high)) return 0.0;
     return extent>0.0?amount*(high-low)/(2.0*extent):amount;
 }
 #endif
