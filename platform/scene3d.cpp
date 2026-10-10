@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -191,6 +192,7 @@ float fps;
 const char *graphicsConfig="graphics.cfg";
 std::unordered_map<const mobj_t*, std::array<float,3>> oldThings;
 std::vector<SurfaceLight> surfaceLights;
+std::map<SurfaceLightKey,int> surfaceGroups; // Tile key to visibility group (groupSurfaceLights).
 float surfaceEye[3];
 SurfaceLightSelection surfaceSelection;
 uint64_t surfaceLightTime;
@@ -835,7 +837,7 @@ void findDoors();
 void buildMap() {
     finishRelight(false);
     batches.clear();shadowBatches.clear();
-    surfaceSelection.clear();flatLightSamples.clear();surfaceLightTime=0;
+    surfaceSelection.clear();flatLightSamples.clear();surfaceGroups.clear();surfaceLightTime=0;
     floors.assign(numsubsectors,{});
     float minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9;
     for(int i=0;i<numvertexes;++i) {
@@ -1400,7 +1402,6 @@ StaticSample traceStatic(float x,float y,float z,int sector,const BakeMap &map=b
     }
     for(int g=1;g<flickerGroups;++g)if(groups[g]>0&&groups[g]>(sample.group?groups[sample.group]:0))sample.group=g;
     if(sample.group)sample.groupShare=groups[sample.group]/sample.amount;
-    fillHeadroom(sample.color.data(),lighting(&sectors[sector]));
     return sample;
 }
 // Grid lighting (settings.gridSpriteLight): a StaticSample every 32 units,
@@ -1493,6 +1494,7 @@ std::array<float,3> bakedLightAt(float x,float y,float z,const sector_t *sector,
     StaticSample statics;
     if(bakedLightsActive)statics=gridLightActive()?gridStatic(x,y,z):traceStatic(x,y,z,(int)(sector-sectors));
     std::array<float,3> result=statics.color;
+    fillHeadroom(result.data(),lighting(sector));
     if(bakeOnlyActive&&statics.group) {
         float flicker=1-statics.groupShare*(1-groupFlicker(statics.group));
         for(float &c:result)c*=flicker;
@@ -1506,6 +1508,14 @@ std::array<float,3> bakedLightAt(float x,float y,float z,const sector_t *sector,
     }
     if(sample)*sample=statics;
     return result;
+}
+// The lamp color of the sector light at a sprite lit at that level (lampTint),
+// packed for Vertex::lampTint; white without static light.
+unsigned packedLampTint(const StaticSample &statics,float light) {
+    float tint[3];lampTint(statics.color.data(),light,tint);
+    unsigned packed=0xFF000000u;
+    for(int c=0;c<3;++c)packed|=(unsigned)std::lround(std::clamp(tint[c],0.0f,1.0f)*255)<<(8*c);
+    return packed;
 }
 // The static light that casts a thing's shadow, when bake-only lights or the
 // grid stand in for the dynamic copies: above the thing's feet at z.
@@ -1618,6 +1628,98 @@ unsigned sectorMode(const sector_t *sector) {return unsigned(sector-sectors+1)<<
 void quad(std::vector<Vertex> &out,Vertex a,Vertex b,Vertex c,Vertex d) {
     out.insert(out.end(),{a,b,c,a,c,d});
 }
+// A wall light's normal from its merge group (facing 2+ the normal's
+// octant), for doom_panel_emission; flat lights have none.
+std::array<float,2> panelNormal(const SurfaceLight &light) {
+    if(light.facing<2)return {0,0};
+    float angle=(light.facing-2)*(float)(M_PI/4);
+    return {std::cos(angle),std::sin(angle)};
+}
+// Visibility groups of emissive tiles (SurfaceLight::group), per level: in
+// each merge cell, a tile joins the first group whose first tile it sees
+// along a bake ray, else starts its own. Cells are regrouped whenever a tile
+// first appears (a moving door reshapes its wall pieces); the bake map's
+// heights at that moment decide.
+bool tileSees(const SurfaceLight &a,const SurfaceLight &b) {
+    float d[3]={b.x-a.x,b.y-a.y,b.z-a.z},length=std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+    if(length<1)return true;
+    for(float &c:d)c/=length;
+    int sector=(int)(R_PointInSubsector((fixed_t)(a.x*FRACUNIT),(fixed_t)(a.y*FRACUNIT))->sector-sectors);
+    return traceRay(bakeMap,sector,a.x,a.y,a.z,d,length-0.5f,SkyCeiling::open);
+}
+void groupSurfaceLights(std::vector<SurfaceLight> &tiles) {
+    if(bakeMap.sectors.size()!=(size_t)numsectors)return;
+    std::set<SurfaceLightKey> stale;
+    for(auto &tile:tiles) {
+        auto known=surfaceGroups.find(tile.key);
+        if(known!=surfaceGroups.end())tile.group=known->second;
+        else {tile.group=0;stale.insert(surfaceCell(tile));}
+    }
+    if(stale.empty())return;
+    std::map<SurfaceLightKey,std::vector<SurfaceLight*>> cells;
+    for(auto &tile:tiles) {
+        SurfaceLight plain=tile;plain.group=0;
+        SurfaceLightKey cell=surfaceCell(plain);
+        if(stale.count(cell))cells[cell].push_back(&tile);
+    }
+    for(auto &entry:cells) {
+        auto &members=entry.second;
+        std::sort(members.begin(),members.end(),[](const SurfaceLight *a,const SurfaceLight *b){return a->key<b->key;});
+        std::vector<const SurfaceLight*> seeds;
+        std::vector<std::array<float,4>> sums; // Each group's weighted position sum and weight.
+        auto centerOf=[](const SurfaceLight &like,const std::array<float,4> &sum) {
+            SurfaceLight center=like;center.x=sum[0]/sum[3];center.y=sum[1]/sum[3];center.z=sum[2]/sum[3];
+            return center;
+        };
+        // A tile joins the first group whose first tile it sees; strict, it
+        // also needs the group's center with it added in view of both.
+        auto seed=[&](const std::vector<SurfaceLight*> &tiles,size_t first,bool strict) {
+            for(SurfaceLight *tile:tiles) {
+                float w=std::max(tile->strength,0.001f);
+                std::array<float,4> own={tile->x*w,tile->y*w,tile->z*w,w};
+                int group=-1;
+                for(size_t n=first;n<seeds.size()&&group<0;++n) {
+                    if(!tileSees(*tile,*seeds[n]))continue;
+                    if(strict) {
+                        std::array<float,4> with=sums[n];for(int c=0;c<4;++c)with[c]+=own[c];
+                        SurfaceLight center=centerOf(*tile,with);
+                        if(!tileSees(*tile,center)||!tileSees(*seeds[n],center))continue;
+                    }
+                    group=(int)n;
+                }
+                if(group<0) {group=(int)seeds.size();seeds.push_back(tile);sums.push_back({});}
+                for(int c=0;c<4;++c)sums[group][c]+=own[c];
+                tile->group=group;
+            }
+        };
+        seed(members,0,false);
+        // The merged light stands at its group's weighted center (as in
+        // mergeSurfaceLights); tiles that cannot see it, around a corner of
+        // an odd-shaped room or pool, regroup strictly among themselves, and
+        // any still cut off stand alone.
+        for(int pass=0;pass<6;++pass) {
+            std::vector<SurfaceLight*> cut;
+            for(SurfaceLight *tile:members)
+                if(!tileSees(*tile,centerOf(*tile,sums[tile->group])))cut.push_back(tile);
+            if(cut.empty())break;
+            for(SurfaceLight *tile:cut) {
+                float w=std::max(tile->strength,0.001f);
+                auto &sum=sums[tile->group];sum[0]-=tile->x*w;sum[1]-=tile->y*w;sum[2]-=tile->z*w;sum[3]-=w;
+            }
+            if(pass<3)seed(cut,seeds.size(),true);
+            else for(SurfaceLight *tile:cut) {
+                float w=std::max(tile->strength,0.001f);
+                tile->group=(int)seeds.size();seeds.push_back(tile);sums.push_back({tile->x*w,tile->y*w,tile->z*w,w});
+            }
+        }
+        for(const SurfaceLight *tile:members)surfaceGroups[tile->key]=tile->group;
+    }
+}
+// Merged emissive lights, kept apart where walls divide their tiles.
+std::vector<SurfaceLight> mergedSurfaceLights(std::vector<SurfaceLight> tiles) {
+    groupSurfaceLights(tiles);
+    return mergeSurfaceLights(tiles);
+}
 void surfaceLight(const SurfaceLightKey &key,float x,float y,float z,const Image &image,int facing,float radius=224,float extent=0) {
     if(!settings.emissive || image.emissionWeight==0) return;
     surfaceLights.push_back({key,x,y,z,radius,1.65f*image.emissionWeight,image.emissionColor,facing,extent});
@@ -1673,7 +1775,7 @@ void collectSurfaceLights() {
         // fog-only lights so the glow around torches and pools remains.
         surfaceSelection.clear();
         if(!settings.fog)return;
-        if(settings.emissive)for(const auto &light:mergeSurfaceLights(surfaceLights))
+        if(settings.emissive)for(const auto &light:mergedSurfaceLights(surfaceLights))
             staticFog.push_back({light.x,light.y,light.z,light.radius,light.strength,light.color});
         std::vector<std::pair<float,size_t>> scored;
         for(size_t n=0;n<staticFog.size();++n) {
@@ -1691,14 +1793,15 @@ void collectSurfaceLights() {
     }
     if(!settings.emissive) {surfaceSelection.clear();return;}
     surfaceSelection.capacity=settings.fewerSurfaceLights?8:24;
-    surfaceSelection.update(mergeSurfaceLights(surfaceLights),surfaceEye,seconds);
+    surfaceSelection.update(mergedSurfaceLights(surfaceLights),surfaceEye,seconds);
     // Surface lights reach a short way, but walls still stop them: the bake
     // subtracts only their flat share, so their gloss would otherwise show on
     // shiny surfaces through walls. The Performance switch skips the tests.
     for(const auto &slot:surfaceSelection.slots) {
         const auto &p=slot.light;
+        auto n=panelNormal(p);
         appendLight(p.x,p.y,p.z,p.radius,p.strength*slot.gain,p.color,nullptr,0.35f,!settings.unoccludedSurfaceLights,bakedLightsActive?1.0f:0,
-                    {std::min(p.extent,p.radius),0,0,0});
+                    {std::min(p.extent,p.radius),n[0],n[1],0});
     }
 }
 void wallLights(const line_t &line,int side,Point a,Point b,float bottom,float top,int tex,float anchor,int span) {
@@ -1720,7 +1823,7 @@ void wallLights(const line_t &line,int side,Point a,Point b,float bottom,float t
             float z=anchor-image.emissionV-tileV*image.height;
             float extent=std::max(0.0f,std::min({image.height*stepV*0.5f,top-z,z-bottom}));
             surfaceLight({1,(int)(&line-lines),side,tileU,tileV,span},
-                a.x+(b.x-a.x)*t+nx*4,a.y+(b.y-a.y)*t+ny*4,z,image,facing,224,extent);
+                a.x+(b.x-a.x)*t+nx*DOOM_PANEL_OFFSET,a.y+(b.y-a.y)*t+ny*DOOM_PANEL_OFFSET,z,image,facing,224,extent);
         }
     }
 }
@@ -2707,7 +2810,6 @@ void gatherStatic(const BakeMap &map,int sector,float x,float y,float z,const fl
         // The pool's own surface (facing the way the pool glows).
         else if(inside&&normal[2]*(bakeAreas[n-points].ceiling?-1:1)>0.5f)sheen+=weight;
     }
-    fillHeadroom(sum,lighting(&sectors[sector]));
     for(int c=0;c<3;++c)out[c]=(uint8_t)std::min(255L,std::lround(std::round(sum[c]*32)/32*0.5f*255));
     if(direction)encodeDirection(normal,towards,total,groups,sheen,direction);
 }
@@ -2751,8 +2853,10 @@ void bakeLights() {
         std::vector<SurfaceLight> points;
         for(const auto &light:surfaceLights)
             if(!only||light.key[0]!=0||!poolSurface(light.key[1],light.key[2]))points.push_back(light);
-        for(const auto &light:mergeSurfaceLights(points)) {
-            sources.push_back({light.x,light.y,light.z,light.radius,light.strength,0.35f,{light.color[0],light.color[1],light.color[2]}});
+        for(const auto &light:mergedSurfaceLights(points)) {
+            auto n=panelNormal(light);
+            sources.push_back({light.x,light.y,light.z,light.radius,light.strength,0.35f,{light.color[0],light.color[1],light.color[2]},
+                               std::min(light.extent,light.radius),n[0],n[1]});
             sourceGroups.push_back(0);
         }
     }
@@ -2843,7 +2947,11 @@ void bakeBounce() {
             light=flatCell(ceiling?ceilingLight:floorLight,cell);
             visible=ceiling?0:contactCells[4*cell+2]/255.0f;
         }
-        for(int c=0;c<3;++c)out[c]=(*albedo)[c]*(sunEnergy[c]*visible+(lights?light[c]/255.0f*2:0));
+        // The surface shows its static light within the headroom its sector
+        // leaves (fillHeadroom), as world.frag draws it.
+        float shown[3]={};
+        if(lights) {for(int c=0;c<3;++c)shown[c]=light[c]/255.0f*2;fillHeadroom(shown,lighting(&sectors[hit.sector]));}
+        for(int c=0;c<3;++c)out[c]=(*albedo)[c]*(sunEnergy[c]*visible+shown[c]);
     };
     auto gather=[&](int sector,float x,float y,float z,const float normal[3],uint32_t seed,float out[3]) {
         // A per-sample rotation of the stratified pattern trades banding for fine noise.
@@ -3529,6 +3637,7 @@ void geometry(const Uniforms &camera,float fraction) {
             packedStatics|=(unsigned)std::lround(std::clamp(towards/statics.amount,0.0f,1.0f)*255)<<24;
         }
         if(thing->frame&FF_FULLBRIGHT) pulse={};
+        unsigned tint=thing->frame&FF_FULLBRIGHT?0xFFFFFFFFu:packedLampTint(statics,light);
         // Mode 128: grounding darkens the feet of things that rest on the floor.
         // Sprites have no sun map, so vSun carries strength and height above floor.
         float lift=units(thing->z-thing->floorz),grounding=1-lift/32;
@@ -3537,6 +3646,7 @@ void geometry(const Uniforms &camera,float fraction) {
         auto &vertices=batches[-1-lump];
         for(size_t n=vertices.size()-6;n<vertices.size();++n) {
             vertices[n].red=pulse[0];vertices[n].green=pulse[1];vertices[n].blue=pulse[2];vertices[n].statics=packedStatics;
+            vertices[n].lampTint=tint;
             if(grounded) {vertices[n].mode|=128;vertices[n].sunU=grounding;vertices[n].sunV=vertices[n].z-z+lift;}
             if(soft)vertices[n].sunU=std::clamp(image.width*0.5f,8.0f,64.0f);
         }
@@ -3797,7 +3907,7 @@ void sceneShutdown() {
     flashPulses.clear();lightBlockers.clear();flashes={};
     flashlightTint={};flashlightTargetTint={};flashlightTime=0;flashlightSampleTime=0;
     glowColors.clear();images.clear();floors.clear();floorBounds.clear();sectorFloors.clear();batches.clear();shadowBatches.clear();oldThings.clear();
-    surfaceLights.clear();surfaceSelection.clear();flatLightSamples.clear();surfaceLightTime=0;
+    surfaceLights.clear();surfaceSelection.clear();flatLightSamples.clear();surfaceGroups.clear();surfaceLightTime=0;
     burstBarrels.clear();scorches.clear();seamCells.clear();contactCells.clear();bakeStrips.clear();bakeOrder.clear();wallBakeCells.clear();flatLightCells.clear();bakeMap={};
     bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();staticFog.clear();
     wallDirectionCells.clear();flatDirectionCells.clear();wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;bakeOnlyActive=false;
@@ -4053,10 +4163,10 @@ std::vector<SpriteDraw> weaponDraws(const Uniforms &camera) {
         float x=units(psp.sx)-image.left,y=viewwindowy+viewheight/2.0f-100+units(psp.sy)-image.top;
         std::vector<Vertex> weapon;
         float u0=sf.flip[0]?image.width:0,u1=sf.flip[0]?0:image.width;
-        screenQuad(weapon,x/160-1,1-y/100,image.width/160.0f,image.height/100.0f,u0,0,u1,image.height,
-            bright?1.0f:sunLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,
+        float light=bright?1.0f:sunLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,
                 flowLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,
-                seamLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,lighting(player->mo->subsector->sector)))),
+                seamLightAt(camera.eye[0],camera.eye[1],player->mo->subsector->sector,lighting(player->mo->subsector->sector))));
+        screenQuad(weapon,x/160-1,1-y/100,image.width/160.0f,image.height/100.0f,u0,0,u1,image.height,light,
             relit?11u|(sf.flip[0]?16u:0u):3u);
         // The weapon takes a restrained, capped share of the light around the
         // eye so nearby lamps tint it without washing out the artwork.
@@ -4064,7 +4174,8 @@ std::vector<SpriteDraw> weaponDraws(const Uniforms &camera) {
             StaticSample statics;
             auto baked=bakedLightAt(camera.eye[0],camera.eye[1],camera.eye[2],player->mo->subsector->sector,&statics);
             for(float &c:baked)c=std::min(0.5f,c*0.4f);
-            for(auto &vertex:weapon) {vertex.red=baked[0];vertex.green=baked[1];vertex.blue=baked[2];}
+            unsigned tint=packedLampTint(statics,light);
+            for(auto &vertex:weapon) {vertex.red=baked[0];vertex.green=baked[1];vertex.blue=baked[2];vertex.lampTint=tint;}
             if(relit) {
                 // Lights that reach the weapon, which the shader places about
                 // ten units ahead of the eye; the flashlight only tints it.

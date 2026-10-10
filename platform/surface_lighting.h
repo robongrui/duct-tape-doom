@@ -15,21 +15,26 @@ struct SurfaceLight {
     std::array<float,3> color;
     int facing=0; // Merge group: 0 floor, 1 ceiling, 2+ wall normal octant.
     float extent=0; // Wall panels: half-height of the glowing span around z.
+    int group=0; // Tiles of one merge cell that see each other (surfaceCell).
 };
-// Emissive tiles repeat every 64 units, so one pool or panel run yields
-// dozens of overlapping same-colored lights. Fold each 256-unit cell of a
-// surface direction and hue into one wider light; cells are world-fixed, so
-// merged identities stay stable as the view moves.
+// The merge cell of a tile: 256-unit cell, surface direction, hue and
+// visibility group. Emissive tiles repeat every 64 units, so one pool or
+// panel run yields dozens of overlapping same-colored lights; each cell folds
+// into one wider light. Cells are world-fixed, so merged identities stay
+// stable as the view moves. The group keeps tiles in rooms that cannot see
+// each other (two sides of a wall) from merging into a light inside it.
+inline SurfaceLightKey surfaceCell(const SurfaceLight &light,float cell=256) {
+    int hue=0;
+    for(float c:light.color) hue=hue*4+std::clamp((int)std::lround(c*3),0,3);
+    return {2,(int)std::floor(light.x/cell),(int)std::floor(light.y/cell),(int)std::floor(light.z/cell),light.facing,hue*256+light.group};
+}
+// Fold each merge cell (surfaceCell) into one wider light.
 inline std::vector<SurfaceLight> mergeSurfaceLights(const std::vector<SurfaceLight> &sources,float cell=256) {
     struct Sum {float x=0,y=0,z=0,weight=0,strength=0,radius=0;std::array<float,3> color={};
                 std::array<float,3> low={1e9f,1e9f,1e9f},high={-1e9f,-1e9f,-1e9f};float bottom=1e9f,top=-1e9f;int count=0;};
     std::map<SurfaceLightKey,Sum> cells;
     for(const auto &light:sources) {
-        int hue=0;
-        for(float c:light.color) hue=hue*4+std::clamp((int)std::lround(c*3),0,3);
-        SurfaceLightKey key={2,(int)std::floor(light.x/cell),(int)std::floor(light.y/cell),
-                             (int)std::floor(light.z/cell),light.facing,hue};
-        Sum &sum=cells[key];
+        Sum &sum=cells[surfaceCell(light,cell)];
         float w=std::max(light.strength,0.001f),p[3]={light.x,light.y,light.z};
         sum.x+=light.x*w;sum.y+=light.y*w;sum.z+=light.z*w;sum.weight+=w;
         for(int c=0;c<3;++c) {

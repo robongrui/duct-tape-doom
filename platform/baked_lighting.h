@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <vector>
+#include "flash_lighting.h"
 
 // things: decorations standing in (or reaching into) the sector; see BakeThing.
 struct BakeSector { float floor,ceiling; bool sky; std::vector<int> lines; std::vector<int> things={}; };
@@ -123,22 +124,40 @@ inline float sunVisibility(const BakeMap &map,int sector,float x,float y,float z
     }
     return open/4.0f;
 }
-// A static light with the same falloff and facing as flashAtOpen and
-// flashFacing in platform/shaders/lighting.glsl; without a normal (sprites)
-// there is no facing. Returns the amount added (before color); direction,
-// if given, receives the unit vector toward the light when it reaches the point.
-struct BakeLight { float x,y,z,radius,strength,directionality; float color[3]; };
+// A static light with the same falloff, panel emission and facing as
+// flashAtOpen and flashFacing in platform/shaders/lighting.glsl; without a
+// normal (sprites) there is no facing. A glowing wall panel (extent: half its
+// height, as in flashAt) is a vertical span: rays to the middles of its
+// thirds count a third each, so a lip hiding part of the panel lets part of
+// its light by. (nx, ny): the panel's wall normal (doom_panel_emission), 0
+// for other lights. Returns the amount added (before color); direction, if
+// given, receives the unit vector toward the light when it reaches the point.
+struct BakeLight { float x,y,z,radius,strength,directionality; float color[3]; float extent=0,nx=0,ny=0; };
 inline float addBakedLight(const BakeMap &map,const BakeLight &light,int sector,float x,float y,float z,const float normal[3],float out[3],float *direction=nullptr) {
     float d[3]={light.x-x,light.y-y,light.z-z};
     float distance=std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
     if(distance>=light.radius)return 0;
     float falloff=1-distance/light.radius,amount=light.strength*falloff*falloff*(3-2*falloff);
+    amount*=doom_panel_emission(-d[0],-d[1],-d[2],light.nx,light.ny,normal);
     float facing=1;
     if(distance>0.001f) {
         for(float &c:d)c/=distance;
         if(normal)facing=1+light.directionality*(std::max(0.0f,normal[0]*d[0]+normal[1]*d[1]+normal[2]*d[2])-1);
+        if(amount*facing<1/512.0f)return 0;
         // Stop just short of the light so its own surface never blocks it.
-        if(amount*facing<1/512.0f||!traceRay(map,sector,x,y,z,d,distance-0.5f,SkyCeiling::open))return 0;
+        if(light.extent<=0) {if(!traceRay(map,sector,x,y,z,d,distance-0.5f,SkyCeiling::open))return 0;}
+        else {
+            int open=0;
+            for(int k=-1;k<=1;++k) {
+                float v[3]={light.x-x,light.y-y,light.z+k*light.extent*(2/3.0f)-z};
+                float length=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+                if(length<=0.5f) {++open;continue;}
+                for(float &c:v)c/=length;
+                open+=traceRay(map,sector,x,y,z,v,length-0.5f,SkyCeiling::open);
+            }
+            if(!open)return 0;
+            amount*=open/3.0f;
+        }
     } else d[0]=d[1]=0,d[2]=1;
     for(int c=0;c<3;++c)out[c]+=light.color[c]*amount*facing;
     if(direction)for(int c=0;c<3;++c)direction[c]=d[c];
@@ -218,7 +237,8 @@ inline float addBakedArea(const BakeMap &map,const BakeArea &area,int sector,flo
 // lamp-lit surface gets: in full up to half the headroom, then easing toward
 // the limit. Glowing panels lift a 128 room to about 1.25 instead of the
 // clamp, a hallway already at 224 barely rises, and a torch's moderate glow
-// in a dark room stays nearly as it was. world.frag matches this.
+// in a dark room stays nearly as it was. The bake stores the full light;
+// world.frag and the readers here apply this with the sector's current light.
 constexpr float bakeLimit=1.25f;
 inline float bakeHeadroom(float sectorLight) {return std::max(bakeLimit-sectorLight,0.0f);}
 inline float bakeShoulder(float light,float headroom) {
@@ -226,13 +246,25 @@ inline float bakeShoulder(float light,float headroom) {
     if(light<=knee||rest<=0)return std::min(light,knee);
     return knee+rest*(1-std::exp(-(light-knee)/rest));
 }
-// Static light on a surface in a sector of that light level: its brightest
-// channel follows bakeShoulder, the others keep their ratio to it.
+// Static light on a surface in a sector of that light level: its brightness
+// (luminance) follows bakeShoulder and its channels keep their ratios. A
+// colored lamp adds little brightness, so it still tints a bright sector, as
+// under E1M1's red-lit monitor boxes, where the sector stands at 255.
+inline float bakeLuminance(const float rgb[3]) {return 0.299f*rgb[0]+0.587f*rgb[1]+0.114f*rgb[2];}
 inline void fillHeadroom(float rgb[3],float sectorLight) {
-    float peak=std::max({rgb[0],rgb[1],rgb[2]});
-    if(peak<=0)return;
-    float scale=bakeShoulder(peak,bakeHeadroom(sectorLight))/peak;
+    float luminance=bakeLuminance(rgb);
+    if(luminance<=0)return;
+    float scale=bakeShoulder(luminance,bakeHeadroom(sectorLight))/luminance;
     for(int c=0;c<3;++c)rgb[c]*=scale;
+}
+// A sector's light level stands for the lamps the mapper lit it with, so the
+// static light (full, before fillHeadroom) colors it by its share: the
+// multiplier for the sector light of a point lit at that level. White lamps
+// leave it white. Keep lampTint in world.frag equivalent.
+inline void lampTint(const float statics[3],float light,float out[3]) {
+    float peak=std::max({statics[0],statics[1],statics[2]});
+    float share=peak>0?peak/(peak+std::max(light,0.0f)):0;
+    for(int c=0;c<3;++c)out[c]=1+(peak>0?statics[c]/peak-1:0)*share;
 }
 // Bounce gathering direction around a unit normal: (u,v) in [0,1)^2 maps to
 // a cosine-weighted hemisphere, so averaging what the rays hit is the

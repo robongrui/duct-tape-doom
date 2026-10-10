@@ -23,6 +23,14 @@ int main() {
     eye[0]=1000;selection.update(sources,eye,1.0f/60);
     check(!selection.slots.empty()&&selection.slots[0].gain>0,"Crossing range must fade out instead of dropping the lamp");
     settle(selection,sources,eye);check(selection.slots.empty(),"Out-of-range lamp must eventually release its slot");
+    {
+        // Two same-colored lamps in one merge cell, a wall between them.
+        std::vector<SurfaceLight> pair={lamp(1,64),lamp(2,192)};
+        check(mergeSurfaceLights(pair).size()==1,"Lamps in one cell must merge");
+        pair[1].group=1;
+        auto apart=mergeSurfaceLights(pair);
+        check(apart.size()==2&&(apart[0].x==64||apart[1].x==64),"Lamps that cannot see each other must stay apart");
+    }
     eye[0]=0;sources.clear();selection.clear();
     for(int n=0;n<25;++n)sources.push_back(lamp(n,100+n));
     settle(selection,sources,eye);check(selection.slots.size()==24,"Surface budget must stay bounded");

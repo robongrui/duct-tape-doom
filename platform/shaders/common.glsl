@@ -29,6 +29,8 @@ layout(location=6) flat VARYING uvec2 vLightMask;
 layout(location=7) VARYING vec2 vSun;
 // Sprites with bake-only lights: static light direction (xyz) and share (w), unorm bytes.
 layout(location=8) flat VARYING uint vStatic;
+// Sprites: the sector light's lamp color (lampTint in baked_lighting.h), unorm bytes.
+layout(location=9) flat VARYING uint vLampTint;
 
 float saturate(float x) {return clamp(x,0.0,1.0);}
 vec3 saturate(vec3 x) {return clamp(x,vec3(0.0),vec3(1.0));}

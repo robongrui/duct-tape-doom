@@ -318,6 +318,17 @@ static int flash_lighting(void)
         CHECK(doom_flash_facing(4,100,32,wall,&lamp)>0.65f);
     }
     {
+        /* A panel 4 units in front of a wall at x=-4, facing +x. */
+        doom_flash_t panel={{0,0,64,200},1,0,0,0,{1,1,1,0},{0,1,0,0}};
+        const float wall[3]={1,0,0},floor[3]={0,0,1};
+        CHECK(fabsf(doom_flash_at(100,0,64,&panel,NULL)-0.5f)<0.001f); /* Straight ahead, full. */
+        CHECK(doom_flash_at(-10,0,0,&panel,NULL)==0); /* Behind the wall. */
+        CHECK(doom_panel_emission(-4,0,-64,1,0,floor)==0); /* Floor at the wall's foot. */
+        CHECK(doom_panel_emission(-2,0,-64,1,0,floor)<doom_panel_emission(20,0,-64,1,0,floor)); /* Fades in. */
+        CHECK(doom_panel_emission(-4,40,0,1,0,wall)==1); /* Its own wall stays lit. */
+        CHECK(doom_panel_emission(-50,0,0,0,0,NULL)==1); /* Not a panel. */
+    }
+    {
         doom_flash_t lamp={{0,0,32,200},1,0,0,0,{1,1,1,0}};
         doom_light_blocker_t front={{50,50,50,-50},{1,-1,0,0}}; /* Sector side faces the lamp. */
         doom_light_blocker_t back={{50,-50,50,50},{1,-1,0,0}};

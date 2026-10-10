@@ -107,7 +107,7 @@ takes a screenshot.
 - **Walls and floors:** crisp pixels, smooth bilinear, or sharp bilinear, which keeps texels flat and only softens the step between them (**Edge softness** sets how far). **Palette mipmaps** keep distant smooth or sharp surfaces from shimmering.
 - **Sprites:** crisp pixels (default), pixel-art upscale (xBR), or soft bilinear filtering.
 - **Bump detail and metal gloss:** derived from the WAD artwork, plus rounded sprite lighting with rim light on backlit enemies; affects dynamic lights only. Optional **varied highlights** make them tight on smooth artwork and broad on busy artwork.
-- **Emissive textures:** glowing lamp strips, computer displays, lava and nukage, with soft bloom and colored light on nearby surfaces.
+- **Emissive textures:** glowing lamp strips, computer displays, lava and nukage, with soft bloom and colored light on nearby surfaces. The room's own light takes their color where they light it, monsters and the weapon included, and wall panels light only what they face.
 - **Glossy monitor screens:** screens in computer textures get curved CRT glass that bends the picture and catches highlights.
 
 **Lighting**

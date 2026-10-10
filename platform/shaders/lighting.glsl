@@ -12,11 +12,24 @@ float lightFalloff(vec3 point,uint i) {
     }
     return falloff;
 }
-float flashAtOpen(vec3 point,uint i) {
+// Glowing wall panels (direction.yz: their wall's normal, no cone) shine only
+// ahead of the wall they sit 4 units in front of, fading out toward its plane;
+// a receiver's normal keeps the wall around the panel lit. Matches
+// doom_panel_emission; normal is vec3(0) where there is none.
+float panelEmission(vec3 point,vec3 normal,uint i) {
+    vec2 n=lights[i].direction.yz;
+    if(lights[i].direction.w>0.0||(n.x==0.0&&n.y==0.0)) return 1.0;
+    vec3 delta=point-lights[i].position.xyz;
+    float ahead=dot(delta.xy,n)+4.0;
+    float emission=smoothstep(0.0,0.5,ahead/max(length(delta),1.0));
+    return max(emission,max(0.0,dot(normal.xy,n))*max(0.0,1.0-abs(ahead)/8.0));
+}
+float flashAtOpen(vec3 point,vec3 normal,uint i) {
     float falloff=lightFalloff(point,i);
     if(falloff<=0.0) return 0.0;
-    return lights[i].strength*falloff*falloff*(3.0-2.0*falloff);
+    return lights[i].strength*falloff*falloff*(3.0-2.0*falloff)*panelEmission(point,normal,i);
 }
+float flashAtOpen(vec3 point,uint i) {return flashAtOpen(point,vec3(0),i);}
 #ifdef BLOCKERS
 // Solid walls and closed portal spans stop the ray; matches doom_flash_at.
 // The intersection tests scale by det instead of dividing per blocker.
@@ -46,8 +59,8 @@ bool flashPasses(uint j,vec3 origin3,vec3 delta,inout float low,inout float high
 // after the blockers (doom_flash_slice_blockers): a table of first<<16|count
 // per slice, then 16-bit indices. A ray meets no wall outside its azimuth.
 #define FLASH_SLICES 256u
-float flashAt(vec3 point,uint i) {
-    float amount=flashAtOpen(point,i);
+float flashAt(vec3 point,vec3 normal,uint i) {
+    float amount=flashAtOpen(point,normal,i);
     if(amount<=0.0) return 0.0;
     vec3 origin3=lights[i].position.xyz;
     vec3 delta=point-origin3;
@@ -68,6 +81,7 @@ float flashAt(vec3 point,uint i) {
     } else for(uint j=first;j<first+2u*count;j+=2u) if(!flashPasses(j,origin3,delta,low,high)) return 0.0;
     return extent>0.0?amount*(high-low)/(2.0*extent):amount;
 }
+float flashAt(vec3 point,uint i) {return flashAt(point,vec3(0),i);}
 #endif
 // Lambert facing, blended toward 1 by the light's directionality (color.w):
 // near-surface emissive sources stay soft so they still light their own wall.

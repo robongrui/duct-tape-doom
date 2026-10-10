@@ -106,21 +106,20 @@ vec3 detailNormal(vec2 uv,vec3 normal,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2,out 
     return tiltNormal(normal,slope*0.9,dp1,dp2,duv1,duv2);
 }
 // Static light fills only the headroom the sector's own light level leaves,
-// easing toward a limit (bakeShoulder in baked_lighting.h); the bake applies
-// it, and the static lights' dynamic copies take the same share for their
-// detail and gloss: surfaces recover it from the baked value, sprites per light.
+// easing toward a limit (fillHeadroom in baked_lighting.h). The bake keeps the
+// full light, so a sector whose light changes (flicker, switches) is capped by
+// its current level; the static lights' dynamic copies take the same share for
+// their detail and gloss.
 float bakeHeadroom(float sectorLight) {return max(1.25-sectorLight,0.0);}
 float bakeShoulder(float light,float headroom) {
     float knee=headroom*0.5,rest=headroom-knee;
     if(light<=knee||rest<=0.0) return min(light,knee);
     return knee+rest*(1.0-exp(-(light-knee)/rest));
 }
-// The share of the static light a baked value (its brightest channel) kept.
-float bakeKept(float baked,float headroom) {
-    float knee=headroom*0.5,rest=headroom-knee;
-    if(baked<=knee||rest<=0.0) return 1.0;
-    float raw=knee-rest*log(max(1.0-(baked-knee)/rest,1.0/64.0));
-    return baked/raw;
+// The share of a baked static light (by its luminance) a surface shows.
+float bakeKept(vec3 baked,float headroom) {
+    float luminance=dot(baked,vec3(0.299,0.587,0.114));
+    return luminance>0.0?bakeShoulder(luminance,headroom)/luminance:1.0;
 }
 // Crude materials from the palette's ramps: greys and blues read as metal,
 // greens as wet slime or panels; browns, tans and flesh stay matte.
@@ -521,6 +520,10 @@ void main() {
     uint sector=(vMode>>12)-1u;
     if(mapped&&c.map.w>0.0&&abs(normal.z)>0.5) light=seamLight(vWorld.xy,sector,light);
     if(mapped&&(bakeFlags&32u)!=0u) light=flowLight(vWorld,normal,sector,light);
+    // Static light fills the headroom above this light, which seams and flow
+    // already carry smoothly across sector edges, so a bright sector beside a
+    // dark one shows no edge in the lamp's color.
+    float shownLight=light;
     if(mapped&&c.map.w>0.0) light*=contactShade(vWorld,normal,sector);
     vec3 bounce=vec3(0);vec2 ambient=vec2(0,1);vec4 direction=vec4(0.5,0.5,0,0);
     vec4 baked=mapped?bakedSurface(normal,sector,bounce,ambient,direction):vec4(0,0,0,-1);
@@ -578,7 +581,17 @@ void main() {
     }
     // Preserve the sprite's painted shading with one RGB increment for the
     // whole billboard; world surfaces evaluate colored lighting per pixel.
-    vec3 illumination=vec3(light)*mix(vec3(1),c.sun.rgb,sunShare)*mix(vec3(1),c.fx.yzw,skyShare),specular=vec3(0);
+    // A sector's light level stands for the lamps the mapper lit it with, so
+    // where static light falls, that light takes the lamps' color by their
+    // share: grey under a red lamp turns red, white lamps change nothing, and
+    // the tint fades out with the lamps' reach across sector edges. Sprites
+    // and the weapon bring theirs from the CPU (lampTint in baked_lighting.h).
+    vec3 lampTint=unpackUnorm4x8(vLampTint).rgb;
+    if(mapped&&c.bake.x>0.0&&c.effects.z==0.0) {
+        float peak=max(baked.r,max(baked.g,baked.b));
+        if(peak>0.0) lampTint=mix(vec3(1),baked.rgb/peak,peak/(peak+shownLight));
+    }
+    vec3 illumination=vec3(light)*lampTint*mix(vec3(1),c.sun.rgb,sunShare)*mix(vec3(1),c.fx.yzw,skyShare),specular=vec3(0);
     if(c.effects.z==0.0) {
         // Sprites carry their baked light (and, without detail, their
         // dynamic light) in the tint.
@@ -618,7 +631,10 @@ void main() {
                 mask[word]&=mask[word]-1u;
                 float amount=flashAt(vWorld,i);
                 if(amount<=0.0) continue;
-                if(c.bake.x>0.0) amount*=mix(1.0,bakeShoulder(amount,bakeHeadroom(vLight))/amount,lights[i].baked);
+                if(c.bake.x>0.0) {
+                    float luminance=amount*max(dot(lights[i].color.rgb,vec3(0.299,0.587,0.114)),0.001);
+                    amount*=mix(1.0,bakeShoulder(luminance,bakeHeadroom(vLight))/luminance,lights[i].baked);
+                }
                 vec3 toLight=normalize(lights[i].position.xyz-vWorld);
                 float facing=saturate(dot(n,toLight));
                 // Backlit edges: silhouette normals that face the light glow.
@@ -683,10 +699,10 @@ void main() {
             // for the static lights' dynamic copies, so its light also takes
             // bump detail and gloss where it is bright enough to show them.
             bool useBake=mapped&&c.bake.x>0.0;
-            vec3 staticLight=useBake?baked.rgb*occlusion:vec3(0);
+            float staticKept=useBake?bakeKept(baked.rgb,bakeHeadroom(shownLight)):1.0;
+            vec3 staticLight=useBake?baked.rgb*staticKept*occlusion:vec3(0);
             float staticShare=useBake&&c.bake.z>0.0?direction.b:0.0;
             bool staticDetail=staticShare>0.05&&dot(staticLight,vec3(0.299,0.587,0.114))>0.02;
-            float staticKept=useBake?bakeKept(max(baked.r,max(baked.g,baked.b)),bakeHeadroom(vLight)):1.0;
             bool detail=(uint(c.flashlightTint.w)&1u)!=0u&&(any(notEqual(mask,uvec2(0)))||staticDetail);
             // Glass is smooth: its bulge replaces the artwork's bump detail,
             // and it takes a tighter, stronger highlight than painted metal.
@@ -759,7 +775,7 @@ void main() {
                 uint word=mask.x!=0u?0u:1u;
                 uint i=word*32u+uint(findLSB(mask[word]));
                 mask[word]&=mask[word]-1u;
-                float amount=flashAt(vWorld,i);
+                float amount=flashAt(vWorld,normal,i);
                 if(amount<=0.0) continue;
                 float bakedShare=useBake?lights[i].baked:0.0;
                 amount*=mix(1.0,staticKept,bakedShare);

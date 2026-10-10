@@ -67,6 +67,24 @@ static inline float doom_flash_reach(float dx,float dy,float dz,const doom_flash
     }
     return falloff;
 }
+/* Glowing wall panels sit DOOM_PANEL_OFFSET units in front of their wall and
+ * shine only ahead of it: the light fades out toward the wall's plane, so a
+ * wall cutting it off there (a box's own edge, a niche's corner) leaves no
+ * hard shadow line. (nx, ny) is the wall's unit normal, 0 for other lights.
+ * The receiver's normal, if given, keeps the wall around the panel lit.
+ * Keep panelEmission in platform/shaders/lighting.glsl equivalent. */
+#define DOOM_PANEL_OFFSET 4.0f
+static inline float doom_panel_emission(float dx,float dy,float dz,float nx,float ny,const float *normal) {
+    if(nx==0&&ny==0) return 1;
+    float ahead=dx*nx+dy*ny+DOOM_PANEL_OFFSET,distance=sqrtf(dx*dx+dy*dy+dz*dz);
+    float t=fminf(1,fmaxf(0,ahead/fmaxf(distance,1)*2)),emission=t*t*(3-2*t);
+    if(normal) emission=fmaxf(emission,fmaxf(0,normal[0]*nx+normal[1]*ny)*fmaxf(0,1-fabsf(ahead)/8));
+    return emission;
+}
+/* A light's panel normal lives in direction[1..2] when it has no cone. */
+static inline float doom_flash_emission(float dx,float dy,float dz,const doom_flash_t *f) {
+    return f->direction[3]>0?1:doom_panel_emission(dx,dy,dz,f->direction[1],f->direction[2],NULL);
+}
 /* One blocker against the ray toward (dx, dy, dz): 0 when it stops the ray.
  * A glowing panel's span (flashAt in lighting.glsl): the heights s on it
  * whose rays pass every opening narrow to [low,high]. */
@@ -94,12 +112,12 @@ static inline float doom_flash_amount(const doom_flash_t *f,float falloff,float 
 static inline float doom_flash_at(float x,float y,float z,const doom_flash_t *f,
                                 const doom_light_blocker_t *blockers) {
     float dx=x-f->position[0],dy=y-f->position[1],dz=z-f->position[2];
-    float falloff=doom_flash_reach(dx,dy,dz,f);
-    if(falloff<=0) return 0;
+    float falloff=doom_flash_reach(dx,dy,dz,f),emission=doom_flash_emission(dx,dy,dz,f);
+    if(falloff<=0||emission<=0) return 0;
     float extent=doom_flash_extent(f),low=-extent,high=extent;
     for(uint32_t i=f->first;i<f->first+f->count;++i)
         if(!doom_flash_passes(f,&blockers[i],dx,dy,dz,&low,&high)) return 0;
-    return doom_flash_amount(f,falloff,extent,low,high);
+    return doom_flash_amount(f,falloff,extent,low,high)*emission;
 }
 /* Exact blocker culling; dropping a line never changes doom_flash_at. Lines
  * beyond the radius cannot be crossed, nor can openings spanning every reachable
@@ -247,8 +265,8 @@ static inline uint32_t doom_flash_slice_blockers(const doom_flash_t *f,const doo
 static inline float doom_flash_at_sliced(float x,float y,float z,const doom_flash_t *f,const doom_light_blocker_t *blockers,
                                          const uint32_t table[DOOM_FLASH_SLICES],const uint16_t *indices) {
     float dx=x-f->position[0],dy=y-f->position[1],dz=z-f->position[2];
-    float falloff=doom_flash_reach(dx,dy,dz,f);
-    if(falloff<=0) return 0;
+    float falloff=doom_flash_reach(dx,dy,dz,f),emission=doom_flash_emission(dx,dy,dz,f);
+    if(falloff<=0||emission<=0) return 0;
     float extent=doom_flash_extent(f),low=-extent,high=extent;
     /* Straight above or below the light no line is crossed (det is 0). */
     if(dx!=0||dy!=0) {
@@ -256,7 +274,7 @@ static inline float doom_flash_at_sliced(float x,float y,float z,const doom_flas
         for(uint32_t n=entry>>16;n<(entry>>16)+(entry&0xffff);++n)
             if(!doom_flash_passes(f,&blockers[indices[n]],dx,dy,dz,&low,&high)) return 0;
     }
-    return doom_flash_amount(f,falloff,extent,low,high);
+    return doom_flash_amount(f,falloff,extent,low,high)*emission;
 }
 /* Keep equivalent to flashFacing in platform/shaders/lighting.glsl. The unit normal faces
  * the viewer; color[3] blends from omnidirectional (0) to Lambert (1). */

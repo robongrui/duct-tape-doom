@@ -114,7 +114,7 @@ SDL_GPUShader *shader(const ShaderCode &code,SDL_GPUShaderStage stage,Uint32 sam
 // heatBlend writes only alpha, keeping the lowest (hottest) value.
 enum Blend { opaqueBlend, alphaBlend, heatBlend, addBlend, mirrorBlend, depthBlend };
 enum Depth { noDepth, depthWrite, depthTest, depthAlways, depthOnly };
-// Geometry pipelines read the 60-byte Vertex; screen and sky passes have no vertex input.
+// Geometry pipelines read the 64-byte Vertex; screen and sky passes have no vertex input.
 SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vertex,SDL_GPUShader *fragment,Blend blend,Depth depth,
                                   SDL_GPUSampleCount samples,SDL_GPUTextureFormat color) {
     if(!vertex||!fragment)return nullptr;
@@ -123,12 +123,13 @@ SDL_GPUGraphicsPipeline *pipeline(SDL_GPUShader *vertex,SDL_GPUShader *fragment,
         {0,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,offsetof(Vertex,x)},{1,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,offsetof(Vertex,u)},
         {2,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,offsetof(Vertex,light)},{3,0,SDL_GPU_VERTEXELEMENTFORMAT_UINT,offsetof(Vertex,mode)},
         {4,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,offsetof(Vertex,red)},{5,0,SDL_GPU_VERTEXELEMENTFORMAT_UINT2,offsetof(Vertex,lightMask)},
-        {6,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,offsetof(Vertex,sunU)},{7,0,SDL_GPU_VERTEXELEMENTFORMAT_UINT,offsetof(Vertex,statics)}};
+        {6,0,SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,offsetof(Vertex,sunU)},{7,0,SDL_GPU_VERTEXELEMENTFORMAT_UINT,offsetof(Vertex,statics)},
+        {8,0,SDL_GPU_VERTEXELEMENTFORMAT_UINT,offsetof(Vertex,lampTint)}};
     SDL_GPUGraphicsPipelineCreateInfo info={};
     info.vertex_shader=vertex;info.fragment_shader=fragment;
     if(vertex==worldVertexShader||vertex==reflectVertexShader) {
         info.vertex_input_state.vertex_buffer_descriptions=&buffer;info.vertex_input_state.num_vertex_buffers=1;
-        info.vertex_input_state.vertex_attributes=attributes;info.vertex_input_state.num_vertex_attributes=8;
+        info.vertex_input_state.vertex_attributes=attributes;info.vertex_input_state.num_vertex_attributes=9;
     }
     info.primitive_type=SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode=SDL_GPU_FILLMODE_FILL;info.rasterizer_state.cull_mode=SDL_GPU_CULLMODE_NONE;

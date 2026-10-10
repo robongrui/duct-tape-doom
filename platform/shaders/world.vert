@@ -11,6 +11,7 @@ layout(location=4) in vec3 inTint;
 layout(location=5) in uvec2 inLightMask;
 layout(location=6) in vec2 inSun;
 layout(location=7) in uint inStatic;
+layout(location=8) in uint inLampTint;
 layout(std140,set=1,binding=0) uniform Camera CAMERA_BLOCK c;
 // The depth prepass and the shading pass must place every pixel identically.
 invariant gl_Position;
@@ -20,7 +21,7 @@ layout(std140,set=1,binding=1) uniform Plane { float plane; };
 out float gl_ClipDistance[1];
 #endif
 void main() {
-    vUV=inUV;vLight=inLight;vMode=inMode;vWorld=inPosition;vTint=inTint;vLightMask=inLightMask;vSun=inSun;vStatic=inStatic;
+    vUV=inUV;vLight=inLight;vMode=inMode;vWorld=inPosition;vTint=inTint;vLightMask=inLightMask;vSun=inSun;vStatic=inStatic;vLampTint=inLampTint;
     if((inMode&1u)!=0u) {gl_Position=vec4(inPosition.xy,0,1);vDistance=0;}
     else {
         vec3 d=inPosition-c.eye.xyz;

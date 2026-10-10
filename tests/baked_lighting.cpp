@@ -51,6 +51,21 @@ int main() {
     fillHeadroom(dim,0.25f);fillHeadroom(lamp,0.5f);fillHeadroom(bright,224/255.0f);
     check(dim[0]==0.3f&&lamp[0]+0.5f<=bakeLimit&&lamp[0]>0.6f&&bright[0]+224/255.0f<=bakeLimit,
           "Static light must fill only the headroom a sector's light level leaves");
+    {
+        // A glowing panel (18..78 high) seen through a low opening that hides
+        // its middle but not its bottom still lends part of its light.
+        BakeLight panel={60,64,48,400,1,0.35f,{1,1,1}};panel.extent=30;
+        BakeMap open=rooms({0,128,false,{}},{0,128,false,{}},{0,128,false,{}});
+        BakeMap lip=rooms({0,128,false,{}},{0,30,false,{}},{0,128,false,{}});
+        float full=baked(open,panel,2,300,1,floorUp),part=baked(lip,panel,2,300,1,floorUp);
+        BakeLight point=panel;point.extent=0;
+        check(part>0&&part<full&&baked(lip,point,2,300,1,floorUp)==0,
+              "A panel's light must pass a lip that hides only part of it");
+    }
+    float red[3]={0.7f,0.077f,0.077f};
+    fillHeadroom(red,1.0f);
+    check(red[0]>0.5f&&0.299f*red[0]+0.587f*red[1]+0.114f*red[2]<=bakeHeadroom(1.0f),
+          "A colored lamp must still tint a bright sector within its headroom");
     map=rooms({0,128,true,{}},{0,64,true,{}},{0,64,false,{}});
     torch.z=100;
     check(baked(map,torch,1,200,63,floorUp)>0,"Light must pass over a lower sky neighbor's ceiling");
