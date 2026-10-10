@@ -94,8 +94,9 @@ float oldEye[3], oldYaw;
 std::vector<std::array<float,2>> oldHeights;
 float renderFraction=1;
 // Map-space surface data, built once per level from the linedefs. Each cell
-// stores its sector, the nearest open neighbor sector with a blend weight,
-// the sector its light flows from (bakeFlow), and floor/ceiling distances to
+// stores its sector, the nearest open neighbor sector with blend weights
+// (low byte for the floor, high byte for the ceiling, 255 = half the
+// neighbor's light), the sector its light flows from (bakeFlow), and floor/ceiling distances to
 // walls for contact shading.
 constexpr uint16_t noSector=0xFFFF;
 constexpr float seamBand=16,contactRange=48;
@@ -147,6 +148,10 @@ BakeMap bakeMap;
 int lightBakeKey=-1;
 unsigned lightBakeSerial=0;
 bool bakedLightsActive=false; // This frame's lights rely on the bake.
+// Per sector, how far its light level drops to the room around it while baked
+// lights are on (classifyLampSectors): the brightness its mapper gave it for
+// the lamps over it, which the bake now draws itself.
+std::vector<float> lampDrop;
 bool bakeOnlyActive=false; // ...and static lights come only from it.
 // The baked lights, kept for sprites, and a coarse grid listing the lights
 // that can reach each of its cells.
@@ -362,6 +367,57 @@ Image &withGlassFrame(Image &image,const std::vector<byte> &frame) {
     if(!image.glassFrame)I_Error((char*)"Could not allocate a GPU texture");
     return image;
 }
+// Bump relief for walls and flats (Image::relief), from the artwork's log
+// luminance, so a dark texture's seams count as much as a bright one's (in
+// CEIL3_5 they are a single palette step). R/G: the slope along u and v, 128
+// level and 255 just under 45 degrees; B: how grainy the texels around are,
+// for varied highlights. Seams and mortar get real depth: the height is
+// averaged 11 texels along each axis before taking its slope across, so long
+// straight bands stand out while blotches a few texels wide wash out instead
+// of turning into craters. A weak per-texel Sobel adds only fine pitting.
+// Repeats like the texture.
+Image &withRelief(Image &image) {
+    int w=image.width,h=image.height;size_t count=(size_t)w*h;
+    const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
+    std::vector<float> height(count),across(count),down(count),broad(count),grain(count),rough(count),scratch(count);
+    for(size_t i=0;i<count;++i) {
+        const byte *rgb=palette+image.pixels[2*i]*3;
+        height[i]=std::log((0.299f*rgb[0]+0.587f*rgb[1]+0.114f*rgb[2])/255.0f+0.03f);
+    }
+    auto at=[&](const std::vector<float> &v,int x,int y) {return v[(size_t)((y%h+h)%h)*w+(x%w+w)%w];};
+    // Separable filter: taps along x into scratch, then along y into to.
+    auto filter=[&](const std::vector<float> &from,std::vector<float> &to,const std::vector<float> &alongX,const std::vector<float> &alongY) {
+        int rx=(int)alongX.size()/2,ry=(int)alongY.size()/2;
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+            float sum=0;for(int k=-rx;k<=rx;++k)sum+=alongX[k+rx]*at(from,x+k,y);
+            scratch[(size_t)y*w+x]=sum;
+        }
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+            float sum=0;for(int k=-ry;k<=ry;++k)sum+=alongY[k+ry]*at(scratch,x,y+k);
+            to[(size_t)y*w+x]=sum;
+        }
+    };
+    const std::vector<float> line(11,1/11.0f),tent={0.25f,0.5f,0.25f},binomial={1/16.0f,4/16.0f,6/16.0f,4/16.0f,1/16.0f};
+    filter(height,across,tent,line); // Vertical bands, for the slope along u.
+    filter(height,down,line,tent);   // Horizontal bands, for the slope along v.
+    filter(height,broad,binomial,binomial);
+    for(size_t i=0;i<count;++i)grain[i]=std::fabs(height[i]-broad[i]);
+    filter(grain,rough,binomial,binomial);
+    std::vector<byte> cells(count*4);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        float fx=(at(height,x+1,y-1)+2*at(height,x+1,y)+at(height,x+1,y+1)-at(height,x-1,y-1)-2*at(height,x-1,y)-at(height,x-1,y+1))*0.25f;
+        float fy=(at(height,x-1,y+1)+2*at(height,x,y+1)+at(height,x+1,y+1)-at(height,x-1,y-1)-2*at(height,x,y-1)-at(height,x+1,y-1))*0.25f;
+        float sx=0.25f*fx+1.5f*(at(across,x+1,y)-at(across,x-1,y));
+        float sy=0.25f*fy+1.5f*(at(down,x,y+1)-at(down,x,y-1));
+        float soften=1/(1+std::sqrt(sx*sx+sy*sy)); // Steep edges ease toward 45 degrees.
+        byte *cell=&cells[((size_t)y*w+x)*4];
+        cell[0]=(byte)std::lround(128+127*sx*soften);cell[1]=(byte)std::lround(128+127*sy*soften);
+        cell[2]=(byte)std::lround(std::clamp(rough[(size_t)y*w+x]/0.25f,0.0f,1.0f)*255);cell[3]=255;
+    }
+    image.relief=gpuCreateTexture(GpuFormat::RGBA8,w,h,cells.data(),w*4);
+    if(!image.relief)I_Error((char*)"Could not allocate a GPU texture");
+    return image;
+}
 // Masks live beside graphics.cfg, or in the directory selected by -emissive.
 std::vector<byte> emissionMask(const char *name,bool flat,int w,int h,const byte *pixels) {
     std::vector<byte> mask((size_t)w*h,0);
@@ -401,8 +457,8 @@ Image &wallImage(int index) {
     auto mask=emissionMask(name,false,w,h,pixels.data());
     bool glowing=std::any_of(mask.begin(),mask.end(),[](byte p){return p!=0;});
     std::vector<byte> frame;auto glass=screenGlass(name,false,w,h,pixels.data(),frame);
-    return withGlassFrame(images.emplace(index,upload(w,h,pixels.data(),0,0,glowing?mask.data():nullptr,nullptr,
-        glass.empty()?nullptr:glass.data(),true)).first->second,frame);
+    return withRelief(withGlassFrame(images.emplace(index,upload(w,h,pixels.data(),0,0,glowing?mask.data():nullptr,nullptr,
+        glass.empty()?nullptr:glass.data(),true)).first->second,frame));
 }
 Image &lumpImage(int lump,bool flat) {
     int key=-1-lump; auto found=images.find(key); if(found!=images.end()) return found->second;
@@ -416,8 +472,8 @@ Image &lumpImage(int lump,bool flat) {
         auto mask=emissionMask(name,true,64,64,pixels.data());
         bool glowing=std::any_of(mask.begin(),mask.end(),[](byte p){return p!=0;});
         std::vector<byte> frame;auto glass=screenGlass(name,true,64,64,pixels.data(),frame);
-        return withGlassFrame(images.emplace(key,upload(64,64,pixels.data(),0,0,glowing?mask.data():nullptr,nullptr,
-            glass.empty()?nullptr:glass.data(),true)).first->second,frame);
+        return withRelief(withGlassFrame(images.emplace(key,upload(64,64,pixels.data(),0,0,glowing?mask.data():nullptr,nullptr,
+            glass.empty()?nullptr:glass.data(),true)).first->second,frame));
     }
     if(size<8) I_Error((char*)"Invalid sprite texture");
     const patch_t *patch=(const patch_t*)data;
@@ -486,10 +542,23 @@ void partition(unsigned node,const std::vector<Point> &poly,int depth=0) {
     if(depth>numnodes+1) I_Error((char*)"Invalid BSP tree");
     if(node&NF_SUBSECTOR) {
         unsigned leaf=node&~NF_SUBSECTOR; if(leaf>=(unsigned)numsubsectors) I_Error((char*)"Invalid BSP leaf");
+        // Only solid walls cut the BSP cell down: they hold back the void. A
+        // two-sided seg runs between split vertices rounded to whole units, so
+        // its line strays from the partition the cell already ends on, and
+        // cutting along it on both sides would open sliver cracks to the
+        // neighbor. Solid walls cut along their whole linedef, where the
+        // wall is drawn, not the seg: a seg of a split line strays the same
+        // way and would leave a sliver of void between flat and wall.
         auto shape=poly; const subsector_t &sub=subsectors[leaf];
         for(int i=0;i<sub.numlines;++i) {
             const seg_t &seg=segs[sub.firstline+i];
+            if(seg.backsector)continue;
             Point a={units(seg.v1->x),units(seg.v1->y)},b={units(seg.v2->x),units(seg.v2->y)};
+            if(const line_t *line=seg.linedef) {
+                Point la={units(line->v1->x),units(line->v1->y)},lb={units(line->v2->x),units(line->v2->y)};
+                if((lb.x-la.x)*(b.x-a.x)+(lb.y-la.y)*(b.y-a.y)<0)std::swap(la,lb);
+                a=la;b=lb;
+            }
             shape=clip(shape,a,{b.x-a.x,b.y-a.y},true);
         }
         floors[leaf]=std::move(shape); return;
@@ -498,6 +567,55 @@ void partition(unsigned node,const std::vector<Point> &poly,int depth=0) {
     const node_t &n=nodes[node]; Point origin={units(n.x),units(n.y)},direction={units(n.dx),units(n.dy)};
     partition(n.children[0],clip(poly,origin,direction,true),depth+1);
     partition(n.children[1],clip(poly,origin,direction,false),depth+1);
+}
+// Neighboring leaves are clipped apart, so a shared edge can carry a corner on
+// one side only (a T-junction) or two nearly equal corners: both rasterize as
+// hairline cracks. Snap close corners together, then give every edge the
+// corners lying along it, so neighbors share exact vertices.
+void weldFloors() {
+    constexpr float snap=0.05f,cell=64;
+    std::unordered_map<int64_t,std::vector<Point>> grid;
+    auto key=[](int x,int y){return (int64_t)x<<32|(uint32_t)y;};
+    auto cellOf=[](float v){return (int)std::floor(v/cell);};
+    auto weld=[&](Point p) {
+        int cx=cellOf(p.x),cy=cellOf(p.y);
+        for(int y=cy-1;y<=cy+1;++y)for(int x=cx-1;x<=cx+1;++x) {
+            auto found=grid.find(key(x,y));if(found==grid.end())continue;
+            for(Point q:found->second) if(std::abs(q.x-p.x)<=snap&&std::abs(q.y-p.y)<=snap) return q;
+        }
+        grid[key(cx,cy)].push_back(p);return p;
+    };
+    for(auto &poly:floors) {
+        std::vector<Point> out;
+        for(Point p:poly) {
+            p=weld(p);
+            if(out.empty()||out.back().x!=p.x||out.back().y!=p.y)out.push_back(p);
+        }
+        while(out.size()>1&&out.front().x==out.back().x&&out.front().y==out.back().y)out.pop_back();
+        poly=out.size()<3?std::vector<Point>{}:std::move(out);
+    }
+    for(auto &poly:floors) {
+        if(poly.empty())continue;
+        std::vector<Point> out;
+        for(size_t n=0;n<poly.size();++n) {
+            Point a=poly[n],b=poly[(n+1)%poly.size()];out.push_back(a);
+            float ex=b.x-a.x,ey=b.y-a.y,length2=ex*ex+ey*ey;
+            std::vector<std::pair<float,Point>> along;
+            for(int y=cellOf(std::min(a.y,b.y)-snap);y<=cellOf(std::max(a.y,b.y)+snap);++y)
+                for(int x=cellOf(std::min(a.x,b.x)-snap);x<=cellOf(std::max(a.x,b.x)+snap);++x) {
+                    auto found=grid.find(key(x,y));if(found==grid.end())continue;
+                    for(Point q:found->second) {
+                        float t=((q.x-a.x)*ex+(q.y-a.y)*ey)/length2;
+                        if(t*t*length2<=snap*snap||(1-t)*(1-t)*length2<=snap*snap||t<0||t>1)continue;
+                        float cross=ex*(q.y-a.y)-ey*(q.x-a.x);
+                        if(cross*cross<=snap*snap*length2)along.push_back({t,q});
+                    }
+                }
+            std::sort(along.begin(),along.end(),[](const auto &l,const auto &r){return l.first<r.first;});
+            for(const auto &[t,q]:along)out.push_back(q);
+        }
+        poly=std::move(out);
+    }
 }
 // Liquids are the liquid-named flats the engine animates: Doom 2's SLIME13-16
 // share the name but are still metal floors (MAP04's courtyard).
@@ -582,8 +700,11 @@ void buildSurfaceMaps(float minx,float miny,float maxx,float maxy) {
         if(f==b)continue;
         float ff=front?units(front->floorheight):0,fc=front?units(front->ceilingheight):0;
         float bf=back?units(back->floorheight):0,bc=back?units(back->ceilingheight):0;
-        // Lines only blend light between walkable neighbors; tall steps stay crisp.
-        bool seam=front&&back&&std::abs(ff-bf)<=24;
+        // Floors blend light only between walkable neighbors, so tall steps
+        // stay crisp; ceilings wherever they run on nearly flush, as over a
+        // raised lift whose sector is dimmer than the room.
+        bool floorSeam=front&&back&&std::abs(ff-bf)<=24,ceilingSeam=front&&back&&std::abs(fc-bc)<=24;
+        bool seam=floorSeam||ceilingSeam;
         int x0=std::max(0,(int)std::floor((std::min(ax,bx)-contactRange-minx)/mapCell));
         int x1=std::min(mapWidth-1,(int)std::floor((std::max(ax,bx)+contactRange-minx)/mapCell));
         int y0=std::max(0,(int)std::floor((std::min(ay,by)-contactRange-miny)/mapCell));
@@ -602,7 +723,8 @@ void buildSurfaceMaps(float minx,float miny,float maxx,float maxy) {
             if(ceilingWall)ceilingDistance[index]=std::min(ceilingDistance[index],d);
             if(seam&&(isFront||isBack)&&d<seamDistance[index]) {
                 seamDistance[index]=d;cell.neighbor=(uint16_t)(isFront?b:f);
-                cell.weight=(uint16_t)std::lround(0.5f*(1-d/seamBand)*65535);
+                int weight=(int)std::lround((1-d/seamBand)*255);
+                cell.weight=(uint16_t)((floorSeam?weight:0)|(ceilingSeam?weight<<8:0));
             }
         }
     }
@@ -846,6 +968,7 @@ void buildMap() {
     }
     std::vector<Point> bounds={{minx-128,miny-128},{maxx+128,miny-128},{maxx+128,maxy+128},{minx-128,maxy+128}};
     partition(numnodes?unsigned(numnodes-1):unsigned(NF_SUBSECTOR),bounds);
+    weldFloors();
     sectorFloors.assign(numsectors,{});
     for(int i=0;i<numsubsectors;++i)
         sectorFloors[subsectors[i].sector-sectors].push_back(i);
@@ -860,7 +983,7 @@ void buildMap() {
     buildShore();
     sunBaked=false;lightBakeKey=-1;bounceKey=-1;ambientKey=-1;flowKey=-1;bakeThingsKey=-1;wallBakeTexture=nullptr;flatLightTexture=nullptr;
     skyOpeningOf.clear();skyOpenings.clear();sunShafts.clear();beamAir.clear();
-    bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();
+    bakeSources.clear();bakeGrid.clear();bakeAreas.clear();sourceGroups.clear();staticGrid.clear();lampDrop.clear();
     wallDirectionCells.clear();flatDirectionCells.clear();wallDirectionTexture=nullptr;flatDirectionTexture=nullptr;
     layoutBake();relightPending.clear();
     findDoors();
@@ -880,7 +1003,9 @@ float floorZ(const sector_t *sector) {return sectorHeight(sector,false);}
 float ceilZ(const sector_t *sector) {return sectorHeight(sector,true);}
 float lighting(const sector_t *sector,bool bright=false) {
     if(bright) return 1;
-    return std::clamp(sector->lightlevel/255.0f,0.12f,1.0f);
+    float level=sector->lightlevel/255.0f;
+    if(bakedLightsActive&&lampDrop.size()==(size_t)numsectors)level-=lampDrop[sector-sectors];
+    return std::clamp(level,0.12f,1.0f);
 }
 // Shared by the sun and light bakes, built once per level: the sector/line
 // map the rays walk, and a texel for every wall at the floor cell size.
@@ -1243,7 +1368,7 @@ float seamLightAt(float x,float y,const sector_t *sector,float fallback) {
     const auto &cell=seamCells[(size_t)cy*mapWidth+cx];
     uint16_t own=(uint16_t)(sector-sectors);
     if(cell.own!=own||cell.neighbor==noSector)return fallback;
-    return fallback+(lighting(&sectors[cell.neighbor])-fallback)*cell.weight/65535.0f;
+    return fallback+(lighting(&sectors[cell.neighbor])-fallback)*(cell.weight&255)/510.0f;
 }
 std::array<float,3> frameGlow(int sprite,int frame) {
     frame&=FF_FRAMEMASK;
@@ -2834,6 +2959,63 @@ void lightStrip(const BakeMap &map,const BakeStrip &strip,bool only) {
         gatherStatic(map,strip.sector,x,y,z,normal,&wallBakeCells[4*i],only?&wallDirectionCells[4*texel]:nullptr);
     });
 }
+// Lamp-lit sectors: Doom maps fake a lamp's glow with a brighter sector under
+// and around it (E1M1's monitor boxes stand at 255 in a 128 room). With
+// baked lights that glow is drawn by the lamps themselves, falling off
+// smoothly, so the sector's own extra brightness would count it twice and
+// show as a hard-edged bright patch. Touching sectors at the same level are
+// one region and drop together: beside a dimmer sector, without sky, by the
+// baked light every cell of its floors gets (its dimmest cell), but not below
+// its brightest dimmer neighbor; dropped regions pass the level on inward. A
+// bright room its lamps do not fully light keeps its level, glowing pools in
+// it included (E1M1's nukage room), or they would leave the rest of the room
+// as a bright island.
+void classifyLampSectors() {
+    lampDrop.assign(numsectors,0.0f);
+    if(flatLightCells.empty()||seamCells.empty())return;
+    std::vector<float> least(numsectors,INFINITY);
+    for(size_t i=0;i<seamCells.size();++i) {
+        int s=seamCells[i].own;if(s==noSector)continue;
+        const uint8_t *cell=flatCell(floorLight,i);
+        least[s]=std::min(least[s],std::max({cell[0],cell[1],cell[2]})/255.0f*2);
+    }
+    std::vector<float> level(numsectors);
+    for(int i=0;i<numsectors;++i)level[i]=std::clamp(sectors[i].lightlevel/255.0f,0.12f,1.0f);
+    auto neighbors=[&](int i,auto &&visit) {
+        for(int n=0;n<sectors[i].linecount;++n) {
+            const line_t *line=sectors[i].lines[n];
+            const sector_t *other=line->frontsector==&sectors[i]?line->backsector:line->frontsector;
+            if(other&&other!=&sectors[i])visit(int(other-sectors));
+        }
+    };
+    // Regions: their members, dimmest floor cell, and whether sky keeps them.
+    std::vector<int> regionOf(numsectors,-1);
+    std::vector<std::vector<int>> members;std::vector<float> regionLeast;std::vector<bool> fixed;
+    for(int i=0;i<numsectors;++i) {
+        if(regionOf[i]>=0)continue;
+        int r=(int)members.size();members.push_back({i});regionOf[i]=r;
+        float dimmest=INFINITY;bool sky=false;
+        for(size_t k=0;k<members[r].size();++k) {
+            int s=members[r][k];
+            dimmest=std::min(dimmest,least[s]);sky|=sectors[s].ceilingpic==skyflatnum;
+            neighbors(s,[&](int o){if(regionOf[o]<0&&std::abs(level[o]-level[s])<0.01f){regionOf[o]=r;members[r].push_back(o);}});
+        }
+        regionLeast.push_back(dimmest);fixed.push_back(sky||dimmest==INFINITY);
+    }
+    std::vector<float> base=level;
+    for(int pass=0;pass<16;++pass) {
+        bool changed=false;
+        for(size_t r=0;r<members.size();++r) {
+            if(fixed[r])continue;
+            float now=base[members[r][0]],to=-1;
+            for(int s:members[r])neighbors(s,[&](int o){if(base[o]<now-0.01f)to=std::max(to,base[o]);});
+            float lowered=std::max(to,level[members[r][0]]-regionLeast[r]);
+            if(to>=0&&lowered<now-0.01f) {for(int s:members[r])base[s]=lowered;changed=true;}
+        }
+        if(!changed)break;
+    }
+    for(int i=0;i<numsectors;++i)lampDrop[i]=level[i]-base[i];
+}
 // Static lights, baked into the floor/ceiling map and the wall atlas rgb:
 // fullbright decorations and (with emissive textures) merged surface lights,
 // unflickered, with the sector heights in bakeMap. Values step by 1/32, like the
@@ -2890,6 +3072,7 @@ void bakeLights() {
         flatDirectionTexture=gpuCreateTexture(GpuFormat::RGBA8,mapWidth,mapHeight*2,flatDirectionCells.data(),mapWidth*4);
         if(!wallDirectionTexture||!flatDirectionTexture)I_Error((char*)"Could not allocate surface maps");
     }
+    classifyLampSectors();
     fprintf(stderr,"3D lights: %zu static lights%s baked in %.0f ms.\n",sources.size(),
         only?(", "+std::to_string(bakeAreas.size())+" pools, bake-only").c_str():"",(SDL_GetTicksNS()-start)/1e6);
 }

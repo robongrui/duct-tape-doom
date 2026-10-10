@@ -112,8 +112,9 @@ struct Settings {
     int fewerSurfaceLights=0; // Only the 8 nearest glowing-texture lights stay dynamic, not 24.
 };
 // glassFrame: on textures with monitor screens, where each glass pixel sits
-// on its screen (see screen_glass.h); null otherwise.
-struct Image { bool opaque=true; std::vector<byte> pixels; GpuTextureRef texture,glassFrame; int width=0,height=0,left=0,top=0; std::array<float,3> glow={1,1,1}; float glowWeight=0; std::array<float,3> emissionColor={}; float emissionWeight=0,emissionCoverage=0,emissionU=0,emissionV=0; std::array<float,3> average={}; bool averaged=false; };
+// on its screen (see screen_glass.h); null otherwise. relief: on walls and
+// flats, the bump slope and grain the shader shades them with (withRelief).
+struct Image { bool opaque=true; std::vector<byte> pixels; GpuTextureRef texture,glassFrame,relief; int width=0,height=0,left=0,top=0; std::array<float,3> glow={1,1,1}; float glowWeight=0; std::array<float,3> emissionColor={}; float emissionWeight=0,emissionCoverage=0,emissionU=0,emissionV=0; std::array<float,3> average={}; bool averaged=false; };
 
 // Frame profiling for the performance smoke test (I_Render3DProfile).
 struct Profile { bool enabled=false; unsigned skip=0; const char *screenshotPath=nullptr; I_Render3DFrameProfile frame={}; };

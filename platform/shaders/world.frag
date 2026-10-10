@@ -37,14 +37,17 @@ layout(set=2,binding=13) uniform sampler2D glassFrame;
 // Shorelines (buildShore in scene3d.cpp): signed distance to the nearest
 // liquid edge in r (sampled linearly), that edge's liquid sector and tint.
 layout(set=2,binding=14) uniform sampler2D shore;
+// Bump relief of walls and flats (withRelief in scene3d.cpp): slope along u
+// and v in rg (0.5 level), grain in b; level elsewhere.
+layout(set=2,binding=15) uniform sampler2D relief;
 // Storage buffers follow the samplers in SPIR-V but the four uniform blocks in
 // SDL_gpu's Metal layout; METAL selects the second numbering.
 #ifdef METAL
 #define BLOCKER_BINDING 4
 #define SECTOR_BINDING 5
 #else
-#define BLOCKER_BINDING 15
-#define SECTOR_BINDING 16
+#define BLOCKER_BINDING 16
+#define SECTOR_BINDING 17
 #endif
 // Each light's blockers and per-direction slices (buildLightWords in scene3d.cpp).
 layout(std430,set=2,binding=BLOCKER_BINDING) readonly buffer Blockers { uvec4 lightWords[]; };
@@ -60,9 +63,6 @@ layout(location=0) out vec4 outColor;
 #include "xbr.glsl"
 #include "lighting.glsl"
 
-// Surface detail: a Sobel filter over texel luminance tilts the face normal,
-// so dynamic lights rake across mortar and panel seams. Kept deliberately low.
-// busy: the slope's length, how much the artwork changes around the texel.
 float texelLuma(ivec2 p) {
     return dot(texel(image,palette,p,true).rgb,vec3(0.299,0.587,0.114));
 }
@@ -96,14 +96,13 @@ vec3 tiltNormal(vec3 normal,vec2 slope,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2) {
     vec3 tangent,bitangent;textureFrame(normal,dp1,dp2,duv1,duv2,tangent,bitangent);
     return normalize(normal-(slope.x*tangent+slope.y*bitangent));
 }
+// Surface detail: the texel's relief slope tilts the face normal, so lights
+// rake across mortar and panel seams. busy: how grainy the artwork is around
+// the texel (0 smooth, 1 coarse).
 vec3 detailNormal(vec2 uv,vec3 normal,vec3 dp1,vec3 dp2,vec2 duv1,vec2 duv2,out float busy) {
-    ivec2 p=ivec2(floor(uv));
-    float tl=texelLuma(p+ivec2(-1,-1)),t=texelLuma(p+ivec2(0,-1)),tr=texelLuma(p+ivec2(1,-1));
-    float l=texelLuma(p+ivec2(-1,0)),r=texelLuma(p+ivec2(1,0));
-    float bl=texelLuma(p+ivec2(-1,1)),b=texelLuma(p+ivec2(0,1)),br=texelLuma(p+ivec2(1,1));
-    vec2 slope=vec2(tr+2.0*r+br-tl-2.0*l-bl,bl+2.0*b+br-tl-2.0*t-tr)*0.25;
-    busy=length(slope);
-    return tiltNormal(normal,slope*0.9,dp1,dp2,duv1,duv2);
+    vec4 cell=texelFetch(relief,wrapTexel(ivec2(floor(uv)),textureSize(relief,0)),0);
+    busy=smoothstep(0.06,0.36,cell.b);
+    return tiltNormal(normal,(cell.rg*255.0-128.0)/127.0,dp1,dp2,duv1,duv2);
 }
 // Static light fills only the headroom the sector's own light level leaves,
 // easing toward a limit (fillHeadroom in baked_lighting.h). The bake keeps the
@@ -167,8 +166,9 @@ vec4 surfaceTexture(sampler2D source,vec2 uv,vec2 pixel,float lod) {
     return result;
 }
 // Sector light blended across open lines, from cells of this sector or of
-// the neighbor it blends with. Other cells (void, unrelated sectors) are skipped.
-float seamLight(vec2 xy,uint sector,float fallback) {
+// the neighbor it blends with, by the floor or the ceiling weight. Other cells
+// (void, unrelated sectors) are skipped.
+float seamLight(vec2 xy,uint sector,bool ceiling,float fallback) {
     vec2 g=(xy-c.map.xy)*c.map.z-0.5;ivec2 q=ivec2(floor(g));vec2 f=fract(g);
     ivec2 size=textureSize(seams,0);
     float value=0.0,total=0.0;
@@ -178,7 +178,7 @@ float seamLight(vec2 xy,uint sector,float fallback) {
         if(cell.x!=sector&&cell.y!=sector) continue;
         float w=(o.x!=0?f.x:1.0-f.x)*(o.y!=0?f.y:1.0-f.y);
         float l=sectorInfo[cell.x].x;
-        if(cell.y!=0xFFFFu) l=mix(l,sectorInfo[cell.y].x,float(cell.z)/65535.0);
+        if(cell.y!=0xFFFFu) l=mix(l,sectorInfo[cell.y].x,float(ceiling?cell.z>>8:cell.z&255u)/510.0);
         value+=l*w;total+=w;
     }
     return total>0.0001?value/total:fallback;
@@ -383,7 +383,19 @@ vec3 caustics(vec3 world,vec3 normal,uint sector,bool sprite) {
     vec2 g=(at-c.map.xy)*c.map.z;
     float proximity=textureLod(causticMap,g/vec2(mapSize),0.0).a;
     if(proximity<0.004) return vec3(0);
-    uvec4 cell=uvec4(round(texelFetch(causticMap,clamp(ivec2(floor(g)),ivec2(0),mapSize-1),0)*255.0));
+    ivec2 pick=clamp(ivec2(floor(g)),ivec2(0),mapSize-1);
+    // A ceiling reads only cells of its own sector: a cell straddling the
+    // edge of a raised lift in a pool, or a void cell behind it (filled in
+    // for walls), would put the pool's ripples on the lift's ceiling.
+    if(ceiling&&!sprite&&uint(round(texelFetch(seams,pick,0).x*65535.0))!=sector) {
+        ivec2 q=ivec2(floor(g-0.5));bool found=false;
+        for(int n=0;n<4&&!found;++n) {
+            ivec2 o=clamp(q+ivec2(n&1,n>>1),ivec2(0),mapSize-1);
+            if(uint(round(texelFetch(seams,o,0).x*65535.0))==sector) {pick=o;found=true;}
+        }
+        if(!found) return vec3(0);
+    }
+    uvec4 cell=uvec4(round(texelFetch(causticMap,pick,0)*255.0));
     if(cell.a==0u) return vec3(0);
     vec4 water=sectorInfo[cell.r|((cell.g&127u)<<8)];
     vec3 tint=vec3(float(cell.b>>5)/7.0,float((cell.b>>2)&7u)/7.0,float(cell.b&3u)/3.0);
@@ -518,7 +530,7 @@ void main() {
     // Map surfaces carry sector+1 in mode bits 12+; 0 means no sector.
     bool mapped=(vMode>>12)>0u&&!sprite&&c.effects.z==0.0;
     uint sector=(vMode>>12)-1u;
-    if(mapped&&c.map.w>0.0&&abs(normal.z)>0.5) light=seamLight(vWorld.xy,sector,light);
+    if(mapped&&c.map.w>0.0&&abs(normal.z)>0.5) light=seamLight(vWorld.xy,sector,normal.z<0.0,light);
     if(mapped&&(bakeFlags&32u)!=0u) light=flowLight(vWorld,normal,sector,light);
     // Static light fills the headroom above this light, which seams and flow
     // already carry smoothly across sector edges, so a bright sector beside a
@@ -715,12 +727,13 @@ void main() {
                 uint index=uint(round(texelFetch(image,p,0).r*255.0));
                 gloss=paletteGloss(index);
                 // Flag 32768, varied highlights: each ramp's sharpness is
-                // halved where the artwork is busy and doubled where it runs
+                // halved where the artwork is grainy and doubled where it runs
                 // smooth, per texel. The highlight keeps its energy, so broad
-                // ones dim and tight ones brighten against the dark around them.
+                // ones dim and tight ones brighten against the dark around them;
+                // grainy artwork also loses up to a quarter of its gloss.
                 if((bakeFlags&32768u)!=0u) {
-                    shininess=paletteShininess(index)*exp2(1.0-2.0*smoothstep(0.03,0.15,busy));
-                    gloss*=(shininess+2.0)/26.0;
+                    shininess=paletteShininess(index)*exp2(1.0-2.0*busy);
+                    gloss*=(shininess+2.0)/26.0*(1.0-0.25*busy);
                 }
             }
             vec3 view=normalize(c.eye.xyz-vWorld);
