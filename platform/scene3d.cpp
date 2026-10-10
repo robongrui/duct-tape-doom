@@ -156,6 +156,7 @@ bool bakeOnlyActive=false; // ...and static lights come only from it.
 // The baked lights, kept for sprites, and a coarse grid listing the lights
 // that can reach each of its cells.
 std::vector<BakeLight> bakeSources;
+int firstWindowSource=0; // Window lights (addWindowLights) end bakeSources; they cast no thing shadows.
 constexpr float bakeGridCell=128;
 int bakeGridWidth=0,bakeGridHeight=0;
 std::vector<std::vector<int>> bakeGrid;
@@ -1523,7 +1524,7 @@ StaticSample traceStatic(float x,float y,float z,int sector,const BakeMap &map=b
         sample.amount+=weight;
         if(n>=points)continue;
         groups[sourceGroups[n]]+=weight;
-        if(bakeSources[n].z>z-24&&amount>sample.shadowAmount) {sample.shadowAmount=amount;sample.shadow=n;}
+        if(n<firstWindowSource&&bakeSources[n].z>z-24&&amount>sample.shadowAmount) {sample.shadowAmount=amount;sample.shadow=n;}
     }
     for(int g=1;g<flickerGroups;++g)if(groups[g]>0&&groups[g]>(sample.group?groups[sample.group]:0))sample.group=g;
     if(sample.group)sample.groupShare=groups[sample.group]/sample.amount;
@@ -2815,7 +2816,9 @@ void doorSpill(const Uniforms &camera) {
 }
 
 // The light bake's inputs: 1 emissive textures, 2 bake-only lights.
-int lightBakeInputs() {return (settings.emissive?1:0)|(settings.bakeOnlyLights?2:0);}
+int lightBakeInputs() {return (settings.emissive?1:0)|(settings.bakeOnlyLights?2:0)|(settings.windowLight?4:0)|(settings.dimLitRooms?8:0)|
+    (settings.windowLight?(int)std::lround(settings.windowStrength*4)<<4:0)|
+    (settings.dimLitRooms?(int)std::lround(settings.unlitDarkening*20)<<8:0);}
 // Bake-only lights: glowing liquid floors and ceilings (lava, nukage, slime,
 // magma, or flats that mostly glow) light as pools; lamps and panels stay
 // point lights.
@@ -2970,17 +2973,30 @@ void lightStrip(const BakeMap &map,const BakeStrip &strip,bool only) {
 // bright room its lamps do not fully light keeps its level, glowing pools in
 // it included (E1M1's nukage room), or they would leave the rest of the room
 // as a bright island.
+// Darker rooms around lamps and windows (settings.dimLitRooms): a region also
+// drops by the static light its floors get on average (in full: a bright
+// room shows little of it until it drops), at most 60% of its level, so the
+// light visibly comes from its lamps, screens and windows and far corners
+// fall darker. Every region drops by at least settings.unlitDarkening of its
+// level, or a room nothing visibly lights would keep its full even light and
+// look brighter and flatter than the lit rooms around it (E1M3's sector 98).
+// This needs no dimmer neighbor; only regions mostly open to the sky keep
+// their level.
 void classifyLampSectors() {
     lampDrop.assign(numsectors,0.0f);
     if(flatLightCells.empty()||seamCells.empty())return;
-    std::vector<float> least(numsectors,INFINITY);
+    std::vector<float> least(numsectors,INFINITY),shown(numsectors,0.0f);
+    std::vector<int> cells(numsectors,0);
+    std::vector<float> level(numsectors);
+    for(int i=0;i<numsectors;++i)level[i]=std::clamp(sectors[i].lightlevel/255.0f,0.12f,1.0f);
     for(size_t i=0;i<seamCells.size();++i) {
         int s=seamCells[i].own;if(s==noSector)continue;
         const uint8_t *cell=flatCell(floorLight,i);
         least[s]=std::min(least[s],std::max({cell[0],cell[1],cell[2]})/255.0f*2);
+        float rgb[3]={cell[0]/255.0f*2,cell[1]/255.0f*2,cell[2]/255.0f*2};
+        shown[s]+=bakeLuminance(rgb);++cells[s];
     }
-    std::vector<float> level(numsectors);
-    for(int i=0;i<numsectors;++i)level[i]=std::clamp(sectors[i].lightlevel/255.0f,0.12f,1.0f);
+    bool dim=settings.dimLitRooms;
     auto neighbors=[&](int i,auto &&visit) {
         for(int n=0;n<sectors[i].linecount;++n) {
             const line_t *line=sectors[i].lines[n];
@@ -2988,19 +3004,23 @@ void classifyLampSectors() {
             if(other&&other!=&sectors[i])visit(int(other-sectors));
         }
     };
-    // Regions: their members, dimmest floor cell, and whether sky keeps them.
+    // Regions: their members, how far their lamps drop them, and whether sky keeps them.
     std::vector<int> regionOf(numsectors,-1);
     std::vector<std::vector<int>> members;std::vector<float> regionLeast;std::vector<bool> fixed;
     for(int i=0;i<numsectors;++i) {
         if(regionOf[i]>=0)continue;
         int r=(int)members.size();members.push_back({i});regionOf[i]=r;
-        float dimmest=INFINITY;bool sky=false;
+        float dimmest=INFINITY,sum=0;bool sky=false;int count=0,open=0;
         for(size_t k=0;k<members[r].size();++k) {
             int s=members[r][k];
             dimmest=std::min(dimmest,least[s]);sky|=sectors[s].ceilingpic==skyflatnum;
+            sum+=shown[s];count+=cells[s];if(sectors[s].ceilingpic==skyflatnum)open+=cells[s];
             neighbors(s,[&](int o){if(regionOf[o]<0&&std::abs(level[o]-level[s])<0.01f){regionOf[o]=r;members[r].push_back(o);}});
         }
-        regionLeast.push_back(dimmest);fixed.push_back(sky||dimmest==INFINITY);
+        if(dim&&count>0) {
+            float lit=std::max(std::min(sum/count,0.6f*level[i]),settings.unlitDarkening*level[i]);
+            regionLeast.push_back(std::max(dimmest==INFINITY?0.0f:dimmest,lit));fixed.push_back(open*2>count);
+        } else {regionLeast.push_back(dimmest);fixed.push_back(sky||dimmest==INFINITY);}
     }
     std::vector<float> base=level;
     for(int pass=0;pass<16;++pass) {
@@ -3010,11 +3030,64 @@ void classifyLampSectors() {
             float now=base[members[r][0]],to=-1;
             for(int s:members[r])neighbors(s,[&](int o){if(base[o]<now-0.01f)to=std::max(to,base[o]);});
             float lowered=std::max(to,level[members[r][0]]-regionLeast[r]);
-            if(to>=0&&lowered<now-0.01f) {for(int s:members[r])base[s]=lowered;changed=true;}
+            if((to>=0||dim)&&lowered<now-0.01f) {for(int s:members[r])base[s]=lowered;changed=true;}
         }
         if(!changed)break;
     }
     for(int i=0;i<numsectors;++i)lampDrop[i]=level[i]-base[i];
+}
+// The sky's color: the upper rows of the sky texture, above any horizon art,
+// halfway to white.
+std::array<float,3> skyColor() {
+    const Image &sky=wallImage(skytexture);
+    const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
+    double sum[3]={};
+    for(int y=0;y<std::max(1,sky.height*2/5);++y)for(int x=0;x<sky.width;++x) {
+        size_t i=(size_t)y*sky.width+x;if(!sky.pixels[2*i+1])continue;
+        for(int c=0;c<3;++c)sum[c]+=palette[sky.pixels[2*i]*3+c];
+    }
+    double peak=std::max({sum[0],sum[1],sum[2],1e-9});
+    std::array<float,3> tint;
+    for(int c=0;c<3;++c)tint[c]=(float)(0.5+0.5*sum[c]/peak);
+    return tint;
+}
+// Window light: every opening from an indoor sector into a sky sector
+// (windows, doorways, the rim of a hole in the ceiling) is a soft lamp facing
+// inward, built as glowing panels 2 units inside it, about 32 units wide and
+// at most 64 tall. They shine at the sky sector's light level in the sky's
+// color paled further, so the outdoors lights the rooms beside it as Doom
+// shows it, not as its dark textures would bounce it. A panel's strength
+// follows its area (and settings.windowStrength): a long window lights the
+// floor beside it well past the outdoor level before the headroom eases it,
+// a slot barely; light fades out over 448 units.
+void addWindowLights(std::vector<BakeLight> &sources) {
+    std::array<float,3> tint=skyColor();
+    for(float &c:tint)c=0.5f+0.5f*c;
+    float peak=std::max({tint[0],tint[1],tint[2]});
+    for(float &c:tint)c/=peak;
+    for(int i=0;i<numlines;++i) {
+        const line_t &line=lines[i];
+        if(!line.frontsector||!line.backsector)continue;
+        bool frontSky=line.frontsector->ceilingpic==skyflatnum,backSky=line.backsector->ceilingpic==skyflatnum;
+        if(frontSky==backSky)continue;
+        const sector_t *in=frontSky?line.backsector:line.frontsector,*out=frontSky?line.frontsector:line.backsector;
+        float low=std::max(floorZ(in),floorZ(out)),high=std::min(ceilZ(in),ceilZ(out));
+        if(high-low<8)continue;
+        float ax=units(line.v1->x),ay=units(line.v1->y),dx=units(line.v2->x)-ax,dy=units(line.v2->y)-ay;
+        float length=std::hypot(dx,dy);if(length<8)continue;
+        dx/=length;dy/=length;
+        // The front side lies to the right of v1->v2.
+        float nx=in==line.frontsector?dy:-dy,ny=in==line.frontsector?-dx:dx;
+        int columns=std::max(1,(int)std::lround(length/32)),rows=std::max(1,(int)std::ceil((high-low)/64));
+        float width=length/columns,height=(high-low)/rows;
+        float level=std::clamp(out->lightlevel/255.0f,0.12f,1.0f);
+        float strength=1.6f*settings.windowStrength*level*width/128*height/96;
+        for(int column=0;column<columns;++column)for(int row=0;row<rows;++row) {
+            float along=(column+0.5f)*width;
+            sources.push_back({ax+dx*along+nx*2,ay+dy*along+ny*2,low+(row+0.5f)*height,448,strength,0.5f,
+                               {tint[0],tint[1],tint[2]},height*0.5f,nx,ny});
+        }
+    }
 }
 // Static lights, baked into the floor/ceiling map and the wall atlas rgb:
 // fullbright decorations and (with emissive textures) merged surface lights,
@@ -3042,6 +3115,8 @@ void bakeLights() {
             sourceGroups.push_back(0);
         }
     }
+    firstWindowSource=(int)sources.size();
+    if(settings.windowLight) {addWindowLights(sources);sourceGroups.resize(sources.size(),0);}
     int points=(int)sources.size();
     bakeGridWidth=(int)std::ceil(mapWidth*mapCell/bakeGridCell);bakeGridHeight=(int)std::ceil(mapHeight*mapCell/bakeGridCell);
     auto gridX=[&](float x){return std::clamp((int)std::floor((x-mapOrigin[0])/bakeGridCell),0,bakeGridWidth-1);};
@@ -3073,7 +3148,7 @@ void bakeLights() {
         if(!wallDirectionTexture||!flatDirectionTexture)I_Error((char*)"Could not allocate surface maps");
     }
     classifyLampSectors();
-    fprintf(stderr,"3D lights: %zu static lights%s baked in %.0f ms.\n",sources.size(),
+    fprintf(stderr,"3D lights: %zu static lights (%zu window panels)%s baked in %.0f ms.\n",sources.size(),sources.size()-firstWindowSource,
         only?(", "+std::to_string(bakeAreas.size())+" pools, bake-only").c_str():"",(SDL_GetTicksNS()-start)/1e6);
 }
 // Which inputs bounce light gathers: 1 always, 2 the sun, 4 baked lights,
@@ -3107,6 +3182,13 @@ void bakeBounce() {
         short textures[3]={s.midtexture,s.toptexture,s.bottomtexture};
         for(int part=0;part<3;++part)if(textures[part]>0)
             sideAlbedo[((size_t)i*2+side)*3+part]=averageColor(wallImage(texturetranslation[textures[part]]));
+    }
+    // Bounced light keeps only a quarter of the surfaces' own color: Doom's
+    // texture averages are strongly tinted, and taken whole they scatter
+    // patches of stray color around rooms. Lamp colors stay whole.
+    for(auto *albedos:{&flatAlbedo,&sideAlbedo})for(auto &a:*albedos) {
+        float grey=0.299f*a[0]+0.587f*a[1]+0.114f*a[2];
+        for(float &c:a)c=grey+0.25f*(c-grey);
     }
     auto radiance=[&](const BakeHit &hit,float out[3]) {
         if(hit.kind==BakeHit::thing)return; // Decorations stay dark.
@@ -3344,16 +3426,7 @@ void bakeAmbient() {
     if(!skyLights.empty()) {
         std::nth_element(skyLights.begin(),skyLights.begin()+skyLights.size()/2,skyLights.end());
         skyLevel=skyLights[skyLights.size()/2];
-        // The sky's color: the upper rows of the sky texture, above any horizon art.
-        const Image &sky=wallImage(skytexture);
-        const byte *palette=(const byte*)W_CacheLumpName((char*)"PLAYPAL",PU_CACHE);
-        double sum[3]={};
-        for(int y=0;y<std::max(1,sky.height*2/5);++y)for(int x=0;x<sky.width;++x) {
-            size_t i=(size_t)y*sky.width+x;if(!sky.pixels[2*i+1])continue;
-            for(int c=0;c<3;++c)sum[c]+=palette[sky.pixels[2*i]*3+c];
-        }
-        double peak=std::max({sum[0],sum[1],sum[2],1e-9});
-        for(int c=0;c<3;++c)skyTint[c]=(float)(0.5+0.5*sum[c]/peak);
+        skyTint=skyColor();
     }
     // Occlusion counts only hits within 64 units; rays run on only to find
     // the sky, so on maps without one they stop there, open either way.
@@ -4002,6 +4075,8 @@ void loadSettings() {
         else if(!strcmp(key,"sharp_softness")) settings.sharpSoftness=std::clamp(value,0.0f,1.0f);
         else if(!strcmp(key,"palette_mipmaps")) settings.paletteMips=value!=0;
         else if(!strcmp(key,"msaa")) settings.msaa=std::clamp(std::round(value),0.0f,3.0f);
+        else if(!strcmp(key,"window_strength")) settings.windowStrength=std::clamp(std::round(value*4)/4,0.5f,2.0f);
+        else if(!strcmp(key,"unlit_darkening")) settings.unlitDarkening=std::clamp(std::round(value*20)/20,0.0f,0.5f);
         else {
             int v=value!=0;
             if(!strcmp(key,"accelerated"))settings.accelerated=v;
@@ -4051,6 +4126,8 @@ void loadSettings() {
             if(!strcmp(key,"grid_sprite_light"))settings.gridSpriteLight=v;
             if(!strcmp(key,"unoccluded_surface_lights"))settings.unoccludedSurfaceLights=v;
             if(!strcmp(key,"fewer_surface_lights"))settings.fewerSurfaceLights=v;
+            if(!strcmp(key,"window_light"))settings.windowLight=v;
+            if(!strcmp(key,"dim_lit_rooms"))settings.dimLitRooms=v;
         }
     } fclose(file);
 }
@@ -4059,12 +4136,14 @@ void saveSettings() {
     fprintf(file,"accelerated %d\nwidescreen %d\nfilter %d\ncrosshair %d\nlook %d\nretro %d\nfps %d\nscale %d\nfov %.1f\nsprite_filter %d\nemissive %d\nflashlight_tint %.2f\nfog %d\npalette %d\nsurface_detail %d\nsoft_light %d\nreflections %d\nretro_reflections %d\nsun_shadows %d\nbaked_lights %d\nbounce_light %d\ncaustics %d\n"
         "blood %d\nblood_shine %d\nflashlight_shadows %d\nsoft_effects %d\nheat_haze %d\neye_adaptation %d\nsplashes %d\ndust_motes %d\nplayer_shadow %d\ndoor_light %d\nmoving_relight %d\ntexel_lighting %d\n"
         "sky_light %d\nbaked_occlusion %d\ndecoration_shadows %d\nlight_flow %d\nceiling_caustics %d\ncaustics_computed %d\ncaustics_grow %d\ncaustics_angle %d\ncaustics_sway %d\ncaustics_sprites %d\ncaustics_shots %d\ndamp_shores %d\nglossy_screens %d\nweapon_lighting %d\nsun_shafts %d\nsun_disc %d\nsun_scatter %d\nvaried_highlights %d\n"
-        "bake_only_lights %d\ngrid_sprite_light %d\nunoccluded_surface_lights %d\nfewer_surface_lights %d\nmsaa %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n",
+        "bake_only_lights %d\ngrid_sprite_light %d\nunoccluded_surface_lights %d\nfewer_surface_lights %d\nmsaa %.0f\nsharp_softness %.2f\npalette_mipmaps %d\n"
+        "window_light %d\ndim_lit_rooms %d\nwindow_strength %.2f\nunlit_darkening %.2f\n",
         settings.accelerated,settings.widescreen,settings.filter,settings.crosshair,settings.look,settings.retro,settings.fps,settings.scale,settings.fov,settings.spriteFilter,settings.emissive,settings.flashlightTintGain,settings.fog,settings.palette,settings.detail,settings.softLight,settings.reflections,settings.retroReflections,settings.sun,settings.bakedLights,settings.bounce,settings.caustics,
         settings.blood,settings.bloodShine,settings.flashlightShadows,settings.softSprites,settings.heatHaze,settings.eyeAdaptation,settings.splashes,
         settings.dust,settings.playerShadow,settings.doorLight,settings.movingRelight,settings.texelLight,
         settings.skyLight,settings.bakedAO,settings.thingShadows,settings.lightFlow,settings.ceilingCaustics,settings.causticsComputed,settings.causticsGrow,settings.causticsAngle,settings.causticsSway,settings.causticsSprites,settings.causticsShots,settings.dampShores,settings.glossyScreens,settings.weaponLighting,settings.sunShafts,settings.sunDisc,settings.sunScatter,settings.variedHighlights,
-        settings.bakeOnlyLights,settings.gridSpriteLight,settings.unoccludedSurfaceLights,settings.fewerSurfaceLights,settings.msaa,settings.sharpSoftness,settings.paletteMips);
+        settings.bakeOnlyLights,settings.gridSpriteLight,settings.unoccludedSurfaceLights,settings.fewerSurfaceLights,settings.msaa,settings.sharpSoftness,settings.paletteMips,
+        settings.windowLight,settings.dimLitRooms,settings.windowStrength,settings.unlitDarkening);
     fclose(file);
 }
 void settingsChanged() {applySettings();saveSettings();tickTime=0;}

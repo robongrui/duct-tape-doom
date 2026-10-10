@@ -81,6 +81,22 @@ std::vector<OptionTab> optionTabs(Settings &s) {
             {"Baked at level load",{
                 check("Baked static lights",&s.bakedLights,
                     "Torches, lamps and glowing textures light the whole level, baked at level load; nearby ones still flicker."),
+                check("Window light",&s.windowLight,
+                    "Windows, open doorways and holes in the ceiling let the outdoor light in: they light the rooms beside them "
+                    "like big soft lamps in the sky's color, fading deeper into the room. Baked at level load.",
+                    [](const Settings &d){return d.bakedLights!=0;}),
+                slider("Window light strength",&s.windowStrength,0.5,2,0.25,
+                    "How brightly the outdoors shines in through windows and openings. Changing it re-bakes the lights.",
+                    [](const Settings &d){return d.bakedLights!=0&&d.windowLight!=0;}),
+                check("Darker rooms around lamps and windows",&s.dimLitRooms,
+                    "Rooms that lamps, screens and windows light well lose part of their even light level, so the light "
+                    "visibly comes from them and the far corners fall darker. Baked at level load.",
+                    [](const Settings &d){return d.bakedLights!=0;}),
+                slider("Darker rooms without lamps",&s.unlitDarkening,0,0.5,0.05,
+                    "Indoor rooms nothing visibly lights lose this much of their even light level too, so they don't look "
+                    "brighter and flatter than the lamp-lit rooms around them.",
+                    [](const Settings &d){return d.bakedLights!=0&&d.dimLitRooms!=0;},
+                    {"Off","5%","10%","15%","20%","25%","30%","35%","40%","45%","50%"}),
                 check("Sun shadows",&s.sun,"Shadows and sunlit patches baked at level load from the sky texture and map geometry."),
                 check("Bounce light",&s.bounce,
                     "Sunlit and lamp-lit surfaces tint and lift what faces them, including ceilings; baked at level load."),

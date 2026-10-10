@@ -73,6 +73,10 @@ struct Settings {
     int spriteFilter=0; // 0: crisp, 1: bilinear, 2: xBR pixel-art reconstruction.
     int sun=1; // Sun shadows baked at level load from the sky texture.
     int bakedLights=1; // Static lights baked at level load; nearby dynamic copies add flicker and detail.
+    int windowLight=1; // Openings to the sky light the rooms beside them like big soft lamps, in the bake.
+    float windowStrength=1; // How brightly window light shines in (0.5-2).
+    int dimLitRooms=1; // Rooms the baked lamps and windows light well lose part of their flat sector light.
+    float unlitDarkening=0.25f; // With dimLitRooms: the least share of flat light any indoor room loses (0-0.5).
     int bounce=1; // Light bounced from sunlit and lit surfaces, baked at level load.
     int caustics=1; // Rippling light from liquids on nearby walls.
     // Experimental effects, each separately switchable.
