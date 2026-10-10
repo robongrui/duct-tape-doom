@@ -27,6 +27,8 @@ set(shaders
     "sky_vert|screen.vert|SKY"
     "world_frag|world.frag|"
     "opaque_frag|world.frag|OPAQUE"
+    "cutout_frag|world.frag|CUTOUT"
+    "coverage_frag|world.frag|COVERAGE"
     "sky_frag|sky.frag|"
     "sky_surface_frag|sky.frag|SURFACE"
     "shadow_frag|shadow.frag|"

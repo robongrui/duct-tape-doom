@@ -1,7 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// World and sprite shading; OPAQUE enables early depth for full-coverage textures.
-#ifdef OPAQUE
+// World and sprite shading; OPAQUE enables early depth for full-coverage
+// textures. Masked walls (bars, fences) are drawn twice: COVERAGE writes
+// depth where they cover, without light, then CUTOUT shades with early depth
+// against it, so only the frontmost layer pays for lighting.
+#if defined(OPAQUE)||defined(CUTOUT)
 layout(early_fragment_tests) in;
 #endif
 #include "common.glsl"
@@ -532,6 +535,10 @@ void main() {
     // Animated flats and walls crossfade toward their next frame.
     if(blend>0.0) color=mix(color,surfaceTexture(nextImage,uv,texelPixel,lod),blend);
     if(color.a<0.45) discard;
+#ifdef COVERAGE
+    // Depth comes from the rasterizer, per sample like the shading pass.
+    outColor=color;return;
+#endif
     if(blood) color.rgb*=vTint.g;
     // The thick rim of the glass shades the picture's edges, in light steps.
     if(glassy) color.rgb*=round((1.0-0.5*smoothstep(0.7,1.0,max(abs(screen.x),abs(screen.y))))*16.0)/16.0;
@@ -900,7 +907,9 @@ void main() {
         float n=c.projection.z,f=c.projection.w,z=max(n,vDistance-vSun.x);
         depth=f/(f-n)-n*f/((f-n)*z);
     }
+#if !defined(CUTOUT)&&!defined(COVERAGE)
     gl_FragDepth=depth;
+#endif
 #else
     // Mirror pass (water = plane,0,0,1): alpha holds how near the point is
     // to the liquid surface along the mirrored ray, sharp within a step's
