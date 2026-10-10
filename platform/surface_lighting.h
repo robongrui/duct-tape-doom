@@ -58,6 +58,7 @@ struct SurfaceLightSlot { SurfaceLight light; float gain=0; };
 class SurfaceLightSelection {
 public:
     std::vector<SurfaceLightSlot> slots;
+    size_t capacity=24; // Lights kept at once; extra ones fade out.
     void clear() { slots.clear(); }
     void update(const std::vector<SurfaceLight> &sources,const float *eye,float seconds) {
         struct Candidate {const SurfaceLight *light;float score,target;};
@@ -78,7 +79,7 @@ public:
             if(a.score!=b.score) return a.score<b.score;
             return a.light->key<b.light->key;
         });
-        if(candidates.size()>24) candidates.resize(24);
+        if(candidates.size()>capacity) candidates.resize(capacity);
         std::map<SurfaceLightKey,float> targets;
         for(const auto &candidate:candidates) targets[candidate.light->key]=candidate.target;
         float step=std::clamp(seconds,0.0f,0.05f)/0.2f;
@@ -94,7 +95,7 @@ public:
         retained.clear();for(const auto &slot:slots) retained.insert(slot.light.key);
         // Outgoing lights finish fading before their slots are reused.
         for(const auto &candidate:candidates) {
-            if(slots.size()==24) break;
+            if(slots.size()>=capacity) break;
             if(!retained.count(candidate.light->key))
                 slots.push_back({*candidate.light,std::min(step,candidate.target)});
         }

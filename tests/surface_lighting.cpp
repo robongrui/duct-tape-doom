@@ -36,6 +36,12 @@ int main() {
     selection.update({},eye,1.0f/60);check(!selection.slots.empty(),"Removed material must fade out");
     settle(selection,{},eye);check(selection.slots.empty(),"Removed lights must release their slots");
     settle(selection,sources,eye);selection.clear();check(selection.slots.empty(),"Level reset must discard previous lights");
+    settle(selection,sources,eye);selection.capacity=8;selection.update(sources,eye,1.0f/60);
+    check(selection.slots.size()==24,"A lowered budget must fade extra lamps out, not drop them");
+    settle(selection,sources,eye);
+    check(selection.slots.size()==8&&std::all_of(selection.slots.begin(),selection.slots.end(),[](const SurfaceLightSlot &s){return s.light.x<108;}),
+          "A lowered budget must keep the nearest lamps");
+    selection.capacity=24;selection.clear();
     std::vector<SurfaceLight> pool;
     for(int u=0;u<4;++u) for(int v=0;v<4;++v) pool.push_back({{0,0,0,u,v,0},u*64.0f+32,v*64.0f+32,8,256,1.65f,{0.2f,1,0.1f},0});
     auto merged=mergeSurfaceLights(pool);

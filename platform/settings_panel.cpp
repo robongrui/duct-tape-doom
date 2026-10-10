@@ -168,6 +168,10 @@ std::vector<OptionTab> optionTabs(Settings &s) {
                 check("Unblocked glowing-texture light",&s.unoccludedSurfaceLights,
                     "Light from lamp strips and glowing flats skips the wall tests per pixel. Cheaper near light panels, "
                     "but their highlights can show on shiny surfaces through walls.",
+                    [](const Settings &d){return d.emissive!=0&&d.bakeOnlyLights==0;}),
+                check("Fewer glowing-texture lights",&s.fewerSurfaceLights,
+                    "Only the 8 nearest lamp strips and glowing flats light their surroundings per pixel, not 24. Cheaper in rooms "
+                    "full of light panels; farther ones keep their baked glow but lose their moving highlights.",
                     [](const Settings &d){return d.emissive!=0&&d.bakeOnlyLights==0;})}}}}};
 }
 }
