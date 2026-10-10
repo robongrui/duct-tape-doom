@@ -142,13 +142,31 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # The previous tag and the commits since it.
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # What's new: .github/changes/<tag>.md when written by hand, otherwise
+      # the commit subjects since the previous tag; then the download notes.
+      - name: Write release notes
+        run: |
+          previous=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          {
+            echo "## What's new in $GITHUB_REF_NAME"
+            echo
+            if [ -f ".github/changes/$GITHUB_REF_NAME.md" ]; then
+              cat ".github/changes/$GITHUB_REF_NAME.md"
+            elif [ -n "$previous" ]; then
+              git log --no-merges --reverse --format='- %s' "$previous..$GITHUB_REF_NAME"
+            fi
+            echo
+            cat .github/release-notes.md
+          } > release-notes.md
       - name: Create pre-release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create "$GITHUB_REF_NAME" dist/* --prerelease
-          --title "Duct-Tape DOOM $GITHUB_REF_NAME" --notes-file .github/release-notes.md
+          --title "Duct-Tape DOOM $GITHUB_REF_NAME" --notes-file release-notes.md

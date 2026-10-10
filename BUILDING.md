@@ -335,8 +335,12 @@ build) as `default.wad`, plus all licenses. The Mac app is a universal binary
 for macOS 11 and later; Windows uses the static MSVC runtime; Linux is built on
 Ubuntu 22.04 for older glibc. SDL is linked statically everywhere. Running the
 workflow by hand from the Actions tab builds the same downloads as artifacts
-without publishing a release. The text of the release page is
-`.github/release-notes.md`.
+without publishing a release.
+
+The release page opens with "What's new": the text of `.github/changes/<tag>.md`
+(for example `.github/changes/v0.1.7.md`) when that file is committed before
+tagging, otherwise the subject lines of the commits since the previous tag. The
+download and first-launch notes from `.github/release-notes.md` follow.
 
 By default the Mac app is only signed ad hoc, and players allow it once under
 System Settings → Privacy & Security (the release notes explain how). It is
